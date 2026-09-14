@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>文章列表</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #1a1a1a;
+    --muted: #666666;
+    --border: #e5e5e5;
+    --accent: #007bff;
+    --card-bg: #fafafa;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a;
+      --fg: #e8e8e8;
+      --muted: #9a9a9a;
+      --border: #2a2d33;
+      --accent: #4c9aff;
+      --card-bg: #1b1e24;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    line-height: 1.5;
+  }
+  main {
+    max-width: 640px;
+    margin: 0 auto;
+    padding: 48px 20px 80px;
+  }
+  h1 {
+    font-size: 22px;
+    margin: 0 0 28px;
+  }
+  ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  li + li {
+    margin-top: 12px;
+  }
+  a.article {
+    display: block;
+    padding: 16px 18px;
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    text-decoration: none;
+    color: inherit;
+    transition: border-color 0.15s ease, transform 0.15s ease;
+  }
+  a.article:hover {
+    border-color: var(--accent);
+    transform: translateY(-1px);
+  }
+  .title {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--fg);
+  }
+  .desc {
+    margin-top: 4px;
+    font-size: 13px;
+    color: var(--muted);
+  }
+</style>
+</head>
+<body>
+  <main>
+    <h1>文章列表</h1>
+    <ul>
+      <li>
+        <a class="article" href="/options-calculator/">
+          <div class="title">期权计算器</div>
+          <div class="desc">输入行权价、期权价格等参数，快速计算保证金、毛收益与年化收益率</div>
+        </a>
+      </li>
+      <li>
+        <a class="article" href="/HOW%20PEOPLE%20USE%20CHATGPT-zh-CN-dual.html">
+          <div class="title">How People Use ChatGPT（中英对照）</div>
+          <div class="desc">双语对照阅读版本</div>
+        </a>
+      </li>
+    </ul>
+  </main>
+</body>
+</html>

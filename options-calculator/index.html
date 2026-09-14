@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>期权计算器</title>
+<style>
+  body {
+    font-family: Arial, sans-serif;
+    margin: 0 auto;
+    padding: 10px;
+    max-width: 100%;
+    font-size: 14px;
+    line-height: 1.2;
+  }
+  h1 {
+    font-size: 18px;
+    text-align: center;
+    margin: 5px 0;
+  }
+  label {
+    display: block;
+    margin: 5px 0 2px;
+    font-size: 14px;
+  }
+  input {
+    width: 100%;
+    padding: 6px;
+    margin-bottom: 8px;
+    font-size: 14px;
+    box-sizing: border-box;
+  }
+  button {
+    width: 100%;
+    padding: 8px;
+    background-color: #007bff;
+    color: white;
+    border: none;
+    cursor: pointer;
+    font-size: 14px;
+  }
+  button:hover {
+    background-color: #0056b3;
+  }
+  #result {
+    margin-top: 10px;
+    padding: 10px;
+    border: 1px solid #ccc;
+    display: none;
+    font-size: 14px;
+  }
+  #result h2 {
+    font-size: 16px;
+    margin: 0 0 5px;
+  }
+  #result p {
+    margin: 2px 0;
+  }
+  #netProfit {
+    color: blue;
+  }
+  #netReturn {
+    color: red;
+  }
+  @media (max-width: 600px) {
+    body {
+      padding: 5px;
+      font-size: 12px;
+    }
+    h1 {
+      font-size: 16px;
+    }
+    label {
+      font-size: 12px;
+    }
+    input {
+      font-size: 12px;
+      padding: 5px;
+    }
+    button {
+      font-size: 12px;
+      padding: 6px;
+    }
+    #result {
+      font-size: 12px;
+    }
+    #result h2 {
+      font-size: 14px;
+    }
+  }
+</style>
+</head>
+<body>
+  <h1>期权计算器</h1>
+  <form id="optionForm">
+    <label for="tradeDate">交易日:</label>
+    <input type="date" id="tradeDate" required>
+
+    <label for="expiryDate">到期日:</label>
+    <input type="date" id="expiryDate" required>
+
+    <label for="strikePrice">行权价:</label>
+    <input type="number" id="strikePrice" step="0.01" min="0" required placeholder="50">
+
+    <label for="optionPrice">期权价格:</label>
+    <input type="number" id="optionPrice" step="0.01" min="0" required placeholder="5">
+
+    <label for="optionQuantity">期权张数:</label>
+    <input type="number" id="optionQuantity" min="1" required placeholder="1">
+
+    <label for="fee">手续费:</label>
+    <input type="number" id="fee" step="0.01" min="0" required placeholder="10">
+
+    <label for="multiplier">合约乘数:</label>
+    <input type="number" id="multiplier" min="1" required placeholder="100">
+
+    <button type="submit">计算</button>
+  </form>
+
+  <div id="result">
+    <h2>计算结果</h2>
+    <p>到期天数: <span id="daysToExpiry"></span></p>
+    <p>保证金: <span id="margin"></span></p>
+    <p>毛收益: <span id="grossProfit"></span></p>
+    <p>年化毛收益率: <span id="grossReturn"></span></p>
+    <p>净利润: <span id="netProfit"></span></p>
+    <p>年化利润率: <span id="netReturn"></span></p>
+  </div>
+
+  <script>
+    const FIELD_IDS = ['tradeDate', 'expiryDate', 'strikePrice', 'optionPrice', 'optionQuantity', 'fee', 'multiplier'];
+    const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+    function todayAsDateInputValue() {
+      const now = new Date();
+      const tzOffsetMs = now.getTimezoneOffset() * 60 * 1000;
+      return new Date(now.getTime() - tzOffsetMs).toISOString().slice(0, 10);
+    }
+
+    window.addEventListener('load', function () {
+      FIELD_IDS.forEach(function (id) {
+        const savedValue = localStorage.getItem(id);
+        if (savedValue) {
+          document.getElementById(id).value = savedValue;
+        }
+      });
+      if (!document.getElementById('tradeDate').value) {
+        document.getElementById('tradeDate').value = todayAsDateInputValue();
+      }
+    });
+
+    document.getElementById('optionForm').addEventListener('submit', function (e) {
+      e.preventDefault();
+
+      const tradeDate = new Date(document.getElementById('tradeDate').value);
+      const expiryDate = new Date(document.getElementById('expiryDate').value);
+      const strikePrice = parseFloat(document.getElementById('strikePrice').value);
+      const optionPrice = parseFloat(document.getElementById('optionPrice').value);
+      const optionQuantity = parseInt(document.getElementById('optionQuantity').value, 10);
+      const fee = parseFloat(document.getElementById('fee').value);
+      const multiplier = parseInt(document.getElementById('multiplier').value, 10);
+
+      const daysToExpiry = Math.round((expiryDate - tradeDate) / MS_PER_DAY);
+      const margin = strikePrice * optionQuantity * multiplier;
+      const grossProfit = optionPrice * optionQuantity * multiplier;
+      const grossReturn = (grossProfit / margin) * (365 / daysToExpiry) * 100;
+      const netProfit = grossProfit - fee;
+      const netReturn = (netProfit / margin) * (365 / daysToExpiry) * 100;
+
+      document.getElementById('daysToExpiry').textContent = daysToExpiry;
+      document.getElementById('margin').textContent = margin.toFixed(2);
+      document.getElementById('grossProfit').textContent = grossProfit.toFixed(2);
+      document.getElementById('grossReturn').textContent = grossReturn.toFixed(2) + '%';
+      document.getElementById('netProfit').textContent = netProfit.toFixed(2);
+      document.getElementById('netReturn').textContent = netReturn.toFixed(2) + '%';
+      document.getElementById('result').style.display = 'block';
+
+      FIELD_IDS.forEach(function (id) {
+        localStorage.setItem(id, document.getElementById(id).value);
+      });
+    });
+  </script>
+</body>
+</html>
