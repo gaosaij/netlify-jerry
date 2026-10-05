@@ -1,6 +1,7 @@
 {
   "options-calculator/index.html": {
     "title": "期权计算器",
+    "pin": true,
     "desc": "输入行权价、期权价格等参数，快速计算保证金、毛收益与年化收益率"
   },
   "HOW PEOPLE USE CHATGPT-zh-CN-dual.html": {

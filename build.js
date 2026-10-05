@@ -1,7 +1,7 @@
 // Netlify 构建脚本：扫描仓库里的文章，生成首页文章列表到 dist/
 //   - 根目录下的 *.html（除 index.html）= 一篇文章，标题取文件名
 //   - 一级子目录里的 index.html = 一篇文章（如 options-calculator/），标题取 <title>
-//   - articles.json 可选，用来给某篇文章指定标题/简介（key 为相对路径）
+//   - articles.json 可选，用来给某篇文章指定标题/简介，或用 "pin": true 置顶（key 为相对路径）
 const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
@@ -58,13 +58,14 @@ for (const e of fs.readdirSync(ROOT, { withFileTypes: true })) {
     rel, href,
     title: titleFor(rel, kind, e.name),
     desc: (meta[rel] && meta[rel].desc) || '',
+    pinned: !!(meta[rel] && meta[rel].pin),
     added: addedTime(rel),
   });
 }
 
-// 新上传的在前；同一时间（或拿不到 git 历史）时，没写进 articles.json 的排在前面
+// 置顶的在最前；其余新上传的在前；同一时间（或拿不到 git 历史）时，没写进 articles.json 的排在前面
 const rank = (a) => (metaOrder.includes(a.rel) ? metaOrder.indexOf(a.rel) + 1 : -1);
-articles.sort((a, b) => b.added - a.added || rank(a) - rank(b) || a.title.localeCompare(b.title, 'zh'));
+articles.sort((a, b) => b.pinned - a.pinned || b.added - a.added || rank(a) - rank(b) || a.title.localeCompare(b.title, 'zh'));
 
 const items = articles.map((a) => `      <li>
         <a class="article" href="${escapeHtml(a.href)}">
