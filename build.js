@@ -1,16 +1,18 @@
 // Netlify 构建脚本：扫描仓库里的文章，生成首页文章列表到 dist/
 //   - 根目录下的 *.html（除 index.html）= 一篇文章，标题取文件名
+//   - 根目录下的 *.md = 一篇文章，构建时自动渲染成网页（样式见 article.template.html），标题取第一个 # 标题
 //   - 一级子目录里的 index.html = 一篇文章（如 options-calculator/），标题取 <title>
 //   - articles.json 可选，用来给某篇文章指定标题/简介，或用 "pin": true 置顶（key 为相对路径）
 const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
+const { marked } = require('marked');
 
 const ROOT = __dirname;
 const OUT = path.join(ROOT, 'dist');
 const SKIP = new Set([
   '.git', '.github', '.netlify', '.claude', '.DS_Store', 'node_modules', 'dist',
-  'netlify-deploy', 'build.js', 'netlify.toml', 'articles.json', 'index.template.html',
+  'netlify-deploy', 'build.js', 'netlify.toml', 'articles.json', 'index.template.html', 'article.template.html',
   'package.json', 'package-lock.json', 'README.md',
 ]);
 
@@ -37,12 +39,16 @@ function addedTime(rel) {
 
 function titleFor(rel, kind, name) {
   if (meta[rel] && meta[rel].title) return meta[rel].title;
+  if (kind === 'md') {
+    const h = fs.readFileSync(path.join(ROOT, rel), 'utf8').match(/^#\s+(.+?)\s*#*\s*$/m);
+    if (h) return h[1].trim();
+  }
   if (kind === 'dir') {
     const html = fs.readFileSync(path.join(ROOT, rel), 'utf8');
     const m = html.match(/<title[^>]*>([^<]*)<\/title>/i);
     if (m && m[1].trim()) return unescapeHtml(m[1].trim());
   }
-  return name.replace(/\.html$/i, '').replace(/_/g, ' ').replace(/\s+/g, ' ').trim();
+  return name.replace(/\.(html|md)$/i, '').replace(/_/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
 const articles = [];
@@ -51,11 +57,14 @@ for (const e of fs.readdirSync(ROOT, { withFileTypes: true })) {
   let rel, href, kind;
   if (e.isFile() && /\.html$/i.test(e.name) && e.name !== 'index.html') {
     rel = e.name; href = '/' + encodeURIComponent(e.name); kind = 'file';
+  } else if (e.isFile() && /\.md$/i.test(e.name)) {
+    const slug = e.name.replace(/\.md$/i, '');
+    rel = e.name; href = '/' + encodeURIComponent(slug) + '.html'; kind = 'md';
   } else if (e.isDirectory() && fs.existsSync(path.join(ROOT, e.name, 'index.html'))) {
     rel = `${e.name}/index.html`; href = '/' + encodeURIComponent(e.name) + '/'; kind = 'dir';
   } else continue;
   articles.push({
-    rel, href,
+    rel, href, kind, name: e.name,
     title: titleFor(rel, kind, e.name),
     desc: (meta[rel] && meta[rel].desc) || '',
     pinned: !!(meta[rel] && meta[rel].pin),
@@ -77,8 +86,16 @@ const items = articles.map((a) => `      <li>
 fs.rmSync(OUT, { recursive: true, force: true });
 fs.mkdirSync(OUT);
 for (const e of fs.readdirSync(ROOT)) {
-  if (SKIP.has(e) || e.startsWith('.')) continue;
+  if (SKIP.has(e) || e.startsWith('.') || /\.md$/i.test(e)) continue;
   fs.cpSync(path.join(ROOT, e), path.join(OUT, e), { recursive: true });
+}
+
+const articleTemplate = fs.readFileSync(path.join(ROOT, 'article.template.html'), 'utf8');
+for (const a of articles.filter((x) => x.kind === 'md')) {
+  const body = marked.parse(fs.readFileSync(path.join(ROOT, a.rel), 'utf8'), { gfm: true })
+    .replace(/(<img\b[^>]*\ssrc=")http:\/\//gi, '$1https://');
+  const page = articleTemplate.replace('{{TITLE}}', escapeHtml(a.title)).replace('{{CONTENT}}', () => body);
+  fs.writeFileSync(path.join(OUT, decodeURIComponent(a.href.slice(1))), page);
 }
 
 const template = fs.readFileSync(path.join(ROOT, 'index.template.html'), 'utf8');

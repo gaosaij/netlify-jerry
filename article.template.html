@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{TITLE}}</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #1a1a1a;
+    --muted: #666666;
+    --border: #e5e5e5;
+    --accent: #007bff;
+    --code-bg: #f4f4f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a;
+      --fg: #e8e8e8;
+      --muted: #9a9a9a;
+      --border: #2a2d33;
+      --accent: #4c9aff;
+      --code-bg: #1f2228;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 17px;
+    line-height: 1.75;
+  }
+  main {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 32px 20px 96px;
+    overflow-wrap: break-word;
+  }
+  .back {
+    display: inline-block;
+    margin-bottom: 24px;
+    font-size: 14px;
+    color: var(--muted);
+    text-decoration: none;
+  }
+  .back:hover { color: var(--accent); }
+  h1, h2, h3, h4 { line-height: 1.35; margin: 1.8em 0 0.6em; }
+  h1 { font-size: 30px; margin-top: 0; }
+  h2 { font-size: 24px; }
+  h3 { font-size: 20px; }
+  h4 { font-size: 18px; }
+  p, ul, ol, blockquote, table, pre { margin: 0 0 1.1em; }
+  ul, ol { padding-left: 1.5em; }
+  li > p { margin: 0.3em 0; }
+  a { color: var(--accent); }
+  img { max-width: 100%; height: auto; border-radius: 6px; }
+  blockquote {
+    margin-left: 0;
+    padding: 0.2em 1em;
+    border-left: 4px solid var(--border);
+    color: var(--muted);
+  }
+  code {
+    background: var(--code-bg);
+    padding: 0.15em 0.35em;
+    border-radius: 4px;
+    font-size: 0.9em;
+  }
+  pre {
+    background: var(--code-bg);
+    padding: 14px 16px;
+    border-radius: 8px;
+    overflow-x: auto;
+  }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; display: block; overflow-x: auto; }
+  th, td { border: 1px solid var(--border); padding: 6px 12px; }
+  hr { border: none; border-top: 1px solid var(--border); margin: 2em 0; }
+</style>
+</head>
+<body>
+  <main>
+    <a class="back" href="/">← 文章列表</a>
+    <article>
+{{CONTENT}}
+    </article>
+  </main>
+</body>
+</html>
