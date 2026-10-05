@@ -1,7 +1,9 @@
 // Netlify 构建脚本：扫描仓库里的文章，生成首页文章列表到 dist/
-//   - 根目录下的 *.html（除 index.html）= 一篇文章，标题取文件名
-//   - 根目录下的 *.md = 一篇文章，构建时自动渲染成网页（样式见 article.template.html），标题取第一个 # 标题
-//   - 一级子目录里的 index.html = 一篇文章（如 options-calculator/），标题取 <title>
+//   - articles/ 文件夹放文章：
+//       *.html = 一篇文章，标题取文件名
+//       *.md   = 一篇文章，构建时自动渲染成网页（样式见 article.template.html），标题取第一个 # 标题
+//       子文件夹/index.html = 一篇文章（带页面的小工具），标题取 <title>
+//   - 仓库根目录下的 *.html、*.md、子文件夹/index.html（如 options-calculator/）规则相同
 //   - articles.json 可选，用来给某篇文章指定标题/简介，或用 "pin": true 置顶（key 为相对路径）
 const fs = require('fs');
 const path = require('path');
@@ -10,6 +12,7 @@ const { marked } = require('marked');
 
 const ROOT = __dirname;
 const OUT = path.join(ROOT, 'dist');
+const ARTICLES_DIR = 'articles';
 const SKIP = new Set([
   '.git', '.github', '.netlify', '.claude', '.DS_Store', 'node_modules', 'dist',
   'netlify-deploy', 'build.js', 'netlify.toml', 'articles.json', 'index.template.html', 'article.template.html',
@@ -25,10 +28,11 @@ const unescapeHtml = (s) =>
   s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&');
 const escapeHtml = (s) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const urlPath = (rel) => '/' + rel.split('/').map(encodeURIComponent).join('/');
 
 function addedTime(rel) {
   try {
-    const lines = execFileSync('git', ['log', '--diff-filter=A', '--format=%ct', '--', rel], {
+    const lines = execFileSync('git', ['log', '--follow', '--diff-filter=A', '--format=%ct', '--', rel], {
       cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
     }).trim().split('\n').filter(Boolean);
     return lines.length ? Number(lines[lines.length - 1]) : 0;
@@ -52,25 +56,32 @@ function titleFor(rel, kind, name) {
 }
 
 const articles = [];
-for (const e of fs.readdirSync(ROOT, { withFileTypes: true })) {
-  if (SKIP.has(e.name) || e.name.startsWith('.')) continue;
-  let rel, href, kind;
-  if (e.isFile() && /\.html$/i.test(e.name) && e.name !== 'index.html') {
-    rel = e.name; href = '/' + encodeURIComponent(e.name); kind = 'file';
-  } else if (e.isFile() && /\.md$/i.test(e.name)) {
-    const slug = e.name.replace(/\.md$/i, '');
-    rel = e.name; href = '/' + encodeURIComponent(slug) + '.html'; kind = 'md';
-  } else if (e.isDirectory() && fs.existsSync(path.join(ROOT, e.name, 'index.html'))) {
-    rel = `${e.name}/index.html`; href = '/' + encodeURIComponent(e.name) + '/'; kind = 'dir';
-  } else continue;
-  articles.push({
-    rel, href, kind, name: e.name,
-    title: titleFor(rel, kind, e.name),
-    desc: (meta[rel] && meta[rel].desc) || '',
-    pinned: !!(meta[rel] && meta[rel].pin),
-    added: addedTime(rel),
-  });
+function scan(base) {
+  const dir = path.join(ROOT, base);
+  if (!fs.existsSync(dir)) return;
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (e.name.startsWith('.')) continue;
+    if (!base && (SKIP.has(e.name) || e.name === ARTICLES_DIR)) continue;
+    const prefix = base ? `${base}/` : '';
+    let rel, href, kind;
+    if (e.isFile() && /\.html$/i.test(e.name) && e.name !== 'index.html') {
+      rel = prefix + e.name; href = urlPath(rel); kind = 'file';
+    } else if (e.isFile() && /\.md$/i.test(e.name)) {
+      rel = prefix + e.name; href = urlPath(rel.replace(/\.md$/i, '.html')); kind = 'md';
+    } else if (e.isDirectory() && fs.existsSync(path.join(dir, e.name, 'index.html'))) {
+      rel = `${prefix}${e.name}/index.html`; href = urlPath(prefix + e.name) + '/'; kind = 'dir';
+    } else continue;
+    articles.push({
+      rel, href, kind,
+      title: titleFor(rel, kind, e.name),
+      desc: (meta[rel] && meta[rel].desc) || '',
+      pinned: !!(meta[rel] && meta[rel].pin),
+      added: addedTime(rel),
+    });
+  }
 }
+scan('');
+scan(ARTICLES_DIR);
 
 // 置顶的在最前；其余新上传的在前；同一时间（或拿不到 git 历史）时，没写进 articles.json 的排在前面
 const rank = (a) => (metaOrder.includes(a.rel) ? metaOrder.indexOf(a.rel) + 1 : -1);
@@ -87,7 +98,7 @@ fs.rmSync(OUT, { recursive: true, force: true });
 fs.mkdirSync(OUT);
 for (const e of fs.readdirSync(ROOT)) {
   if (SKIP.has(e) || e.startsWith('.') || /\.md$/i.test(e)) continue;
-  fs.cpSync(path.join(ROOT, e), path.join(OUT, e), { recursive: true });
+  fs.cpSync(path.join(ROOT, e), path.join(OUT, e), { recursive: true, filter: (src) => !/\.md$/i.test(src) });
 }
 
 const articleTemplate = fs.readFileSync(path.join(ROOT, 'article.template.html'), 'utf8');
@@ -95,7 +106,9 @@ for (const a of articles.filter((x) => x.kind === 'md')) {
   const body = marked.parse(fs.readFileSync(path.join(ROOT, a.rel), 'utf8'), { gfm: true })
     .replace(/(<img\b[^>]*\ssrc=")http:\/\//gi, '$1https://');
   const page = articleTemplate.replace('{{TITLE}}', escapeHtml(a.title)).replace('{{CONTENT}}', () => body);
-  fs.writeFileSync(path.join(OUT, decodeURIComponent(a.href.slice(1))), page);
+  const outFile = path.join(OUT, a.rel.replace(/\.md$/i, '.html'));
+  fs.mkdirSync(path.dirname(outFile), { recursive: true });
+  fs.writeFileSync(outFile, page);
 }
 
 const template = fs.readFileSync(path.join(ROOT, 'index.template.html'), 'utf8');
