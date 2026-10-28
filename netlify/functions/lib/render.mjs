@@ -242,3 +242,142 @@ export function renderStyledPage(meta, doc, html, nonce) {
   if (active) $('body').append(`<script nonce="${nonce}">${STYLED_POLL}</script>`);
   return $.html();
 }
+
+// ================= PDF 转 HTML 的“文档版式”：每页一张白色卡片，像原页面一样 =================
+// 段落保留原来的字体、字号、加粗、斜体、颜色，译文紧跟在后面；
+// 表格原样保留（放在相对定位的容器里，外观和原页面一样），下面再放一个中文对照表。
+export const DOC_PAGES_PER_VIEW = 20;
+
+// 把分段按原页码分组；OCR 识别出的文字（ocrAfter）跟在对应图片后面，表格单元格不单独显示
+export function docPages(blocks) {
+  const pages = [];
+  let cur = null;
+  let curKey = null;
+  for (const b of ordered(blocks)) {
+    if (b.k === 'cell') continue;
+    const key = b.page != null ? b.page : curKey != null ? curKey : 0;
+    if (!cur || key !== curKey) { cur = { page: key, blocks: [] }; pages.push(cur); curKey = key; }
+    cur.blocks.push(b);
+  }
+  return pages;
+}
+
+// 当前这一屏要显示哪些页，以及需要读取哪些表格的原始 HTML
+export function docView(blocks, viewNo = 1) {
+  const all = docPages(blocks);
+  const total = Math.max(1, Math.ceil(all.length / DOC_PAGES_PER_VIEW));
+  const cur = Math.min(Math.max(1, viewNo), total);
+  const pages = all.slice((cur - 1) * DOC_PAGES_PER_VIEW, cur * DOC_PAGES_PER_VIEW);
+  const keys = pages.flatMap((p) => p.blocks.filter((b) => b.k === 'table').map((b) => b.tkey));
+  return { pages, total, cur, keys };
+}
+
+const safeFamily = (f) => (f && /^[\w .-]{1,40}$/.test(f) ? f : '');
+const safeColor = (c) => (c && /^#[0-9a-f]{3,8}$/i.test(c) ? c : '');
+
+function docCss(st, zh) {
+  if (!st) return '';
+  const fam = safeFamily(st.f);
+  const stack = zh ? `${fam ? `'${fam}', ` : ''}'Songti SC','Noto Serif CJK SC','SimSun',serif` : `${fam ? `'${fam}', ` : ''}serif`;
+  const color = safeColor(st.c) || (zh ? '#17406b' : '');
+  return `font-family:${stack};font-size:${Number(st.sz) || 9.5}pt;${st.b ? 'font-weight:bold;' : ''}${st.i ? 'font-style:italic;' : ''}${color ? `color:${color};` : ''}`;
+}
+
+const NUMERIC = /^[\s$()\d,.%—–-]+$/;
+
+// 中文对照表：按原表格的行列生成；文字单元格显示译文（没翻译完就先显示原文），数字原样；全空的列去掉
+function zhTable(b, blocks) {
+  const text = (c) => (c[1] != null ? (blocks[c[1]].zh || blocks[c[1]].en) : c[0] || '');
+  const grid = b.rows.map((r) => { let col = 0; return r.map((c) => { const o = { c, c0: col, span: c[2] || 1 }; col += o.span; return o; }); });
+  const used = new Set();
+  grid.forEach((r) => r.forEach((o) => { if (text(o.c)) for (let k = 0; k < o.span; k++) used.add(o.c0 + k); }));
+  const rows = [];
+  for (const r of grid) {
+    if (!r.some((o) => text(o.c))) continue;
+    const tds = [];
+    for (const o of r) {
+      let span = 0;
+      for (let k = 0; k < o.span; k++) if (used.has(o.c0 + k)) span++;
+      if (!span) continue;
+      const t = text(o.c);
+      tds.push(`<td${span > 1 ? ` colspan="${span}"` : ''}${NUMERIC.test(t) ? ' class="num"' : ''}>${esc(t)}</td>`);
+    }
+    rows.push(`<tr>${tds.join('')}</tr>`);
+  }
+  return rows.length ? `<div class="zt-cap">中文对照</div><table class="zt">${rows.join('')}</table>` : '';
+}
+
+function docBlockHtml(b, blocks, tables) {
+  if (b.k === 'table') {
+    const raw = tables.get(b.tkey);
+    if (!raw) return '';
+    return `<div class="tscroll"><div class="torig" style="position:relative;width:${Number(b.w) || 468}pt;height:${Number(b.h) || 0}pt;margin:0 auto">${raw}</div>${zhTable(b, blocks)}</div>`;
+  }
+  if (b.k === 'img') {
+    if (!/^https?:/i.test(b.src || '')) return '';
+    const w = Number(b.w) > 0 ? `width:${Number(b.w)}pt;` : '';
+    return `<figure class="fig"><img src="${esc(b.src)}" alt="${esc(b.en || '')}" loading="lazy" style="${w}max-width:100%;height:auto"></figure>`;
+  }
+  if (b.k === 'raw' || b.k === 'pre') return blockHtml(b);
+  const tag = /^h[1-6]$/.test(b.k) ? b.k : 'p';
+  const cls = tag === 'p' ? 'd' : 'd dh';
+  const en = `<${tag} class="${cls}" style="${docCss(b.st, false)}">${inline(b, b.en)}</${tag}>`;
+  if (b.s || !b.zh) return en;
+  return en + `<${tag} class="${cls} dz" style="${docCss(b.st || { sz: 9.5 }, true)}">${inline(b, b.zh)}</${tag}>`;
+}
+
+const DOC_CSS = `
+  * { box-sizing: border-box; }
+  body { margin:0; background:#E4E4E4; color:#000; font-family:Arial, sans-serif; }
+  main { padding:16px 8px 80px; }
+  .back { display:inline-block; margin:0 0 10px; font-size:14px; color:#555; text-decoration:none; }
+  #progress { display:none; max-width:612pt; margin:0 auto 12px; padding:12px 16px; background:#fff; border:1px solid #ccc; border-radius:8px; font-size:14px; color:#555; }
+  #progress.show { display:block; }
+  .bar { height:6px; margin-top:8px; background:#ddd; border-radius:3px; overflow:hidden; } .bar div { height:100%; background:#007bff; }
+  .err { color:#d33; }
+  .pager { display:flex; justify-content:space-between; gap:12px; max-width:612pt; margin:0 auto 10px; font-size:14px; color:#555; } .pager a { color:#007bff; text-decoration:none; }
+  .wrap { max-width:612pt; margin:0 auto; } .wrap-top { max-width:612pt; margin:0 auto; }
+  .pgcard { --justify:justify; background:#fff; border:1px solid #ccc; width:612pt; max-width:100%; margin:10px auto; padding:48pt 72pt; overflow-wrap:break-word; }
+  @media (max-width: 800px) { .pgcard { padding:24pt 5vw; } }
+  .pgno { margin:-38pt 0 22pt; text-align:right; font:8pt/1 Arial,sans-serif; color:#aaa; }
+  .d { margin:0 0 .55em; text-align:justify; line-height:1.4; font-family:Georgia,serif; font-size:9.5pt; }
+  .dh { margin-top:1.1em; text-align:left; line-height:1.3; }
+  .dz { margin-top:-.15em; }
+  .fig { margin:.6em 0 1em; text-align:center; } .fig img { display:inline-block; }
+  .tscroll { overflow-x:auto; margin:.4em 0 1em; }
+  .zt-cap { margin:.5em 0 .2em; font:8pt Arial,sans-serif; color:#17406b; }
+  .zt { border-collapse:collapse; width:100%; font:9pt Georgia,"Songti SC","Noto Serif CJK SC",serif; color:#17406b; }
+  .zt td { padding:2px 6px; border-bottom:1px solid #e3e3e3; vertical-align:top; } .zt td.num { text-align:right; white-space:nowrap; }
+  pre { background:#f4f4f5; padding:8px 10px; overflow-x:auto; font-size:8pt; }
+`;
+
+export function renderDocPage(meta, doc, tables, nonce, viewNo = 1) {
+  const { pages, total, cur } = docView(doc.blocks, viewNo);
+  const body = pages.map((p) =>
+    `<section class="pgcard"><div class="pgno">第 ${p.page + 1} 页</div>${p.blocks.map((b) => docBlockHtml(b, doc.blocks, tables)).join('\n')}</section>`).join('\n');
+  const pager = total > 1
+    ? `<nav class="pager">${cur > 1 ? `<a href="?p=${cur - 1}">← 上一部分</a>` : '<span></span>'}<span>第 ${cur} / ${total} 部分（每部分 ${DOC_PAGES_PER_VIEW} 页）</span>${cur < total ? `<a href="?p=${cur + 1}">下一部分 →</a>` : '<span></span>'}</nav>`
+    : '';
+  const active = ['importing', 'ocr', 'queued', 'translating'].includes(meta.status);
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>${esc(meta.title)}</title>
+<style>${DOC_CSS}</style>
+</head>
+<body>
+  <main>
+    <div class="wrap-top"><a class="back" href="/">← 文章列表</a></div>
+    ${banner(meta)}
+    ${pager}
+    <article>
+${body}
+    </article>
+    ${pager}
+  </main>
+${active ? `<script nonce="${nonce}">${POLL}</script>` : ''}
+</body>
+</html>`;
+}

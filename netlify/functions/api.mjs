@@ -180,7 +180,7 @@ async function route(req, path) {
     }
     if (req.method === 'DELETE' && !action) {
       await Promise.all([
-        del(`meta/${slug}`), del(`doc/${slug}`), del(`html/${slug}`), delPrefix(`img/${slug}/`),
+        del(`meta/${slug}`), del(`doc/${slug}`), del(`html/${slug}`), delPrefix(`img/${slug}/`), delPrefix(`tbl/${slug}/`),
         meta.ocr && meta.ocr.uploadId ? delPrefix(`pdf/${meta.ocr.uploadId}/`) : null,
       ]);
       return json({ ok: true });

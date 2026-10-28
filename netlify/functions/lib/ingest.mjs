@@ -1,5 +1,5 @@
 // 把抓取到（或上传的）HTML 变成一篇待翻译的文章：解析 → 检测已有中文/重复 → 保存 → 整页图片 OCR 或直接翻译
-import { getJSON, setJSON, setText, listMeta } from './store.mjs';
+import { getJSON, setJSON, setText, delPrefix, listMeta } from './store.mjs';
 import { kick } from './kick.mjs';
 import {
   parseHtml, analyze, contentHash, makeSlug, decodeBody, sanitizeRawHtml, BACK_LINK,
@@ -61,7 +61,7 @@ export async function fetchPage(url, { syncLimit = 0, timeoutMs = 25000 } = {}) 
 }
 
 // 保存一篇需要对照翻译的文章。slug 已存在（后台导入先建了占位）时更新它
-export async function saveBilingual({ origin, slug, title, blocks, html, source, sourceUrl, translate, ocrImages = true }) {
+export async function saveBilingual({ origin, slug, title, blocks, html, tables, source, sourceUrl, translate, ocrImages = true }) {
   const textBlocks = blocks.filter((b) => b.k !== 'img');
   const candidates = blocks.map((b, i) => (b.big ? { tid: i, src: b.src } : null)).filter(Boolean).slice(0, MAX_OCR_IMAGES);
   if (!textBlocks.length && !candidates.length) throw httpError('没有从文章里提取到正文', 400);
@@ -79,7 +79,9 @@ export async function saveBilingual({ origin, slug, title, blocks, html, source,
     source, sourceUrl, hash, total: info.total, done: 0, createdAt: (old && old.createdAt) || now, updatedAt: now,
     status: 'idle', error: '', note: '', lockAt: 0, ingest: undefined,
   };
-  if (html) meta.layout = 'page';
+  // 版式：page = 保留原网页样式；doc = PDF 转 HTML（页面卡片 + 原表格）；没有 = 通用对照排版
+  if (tables) meta.layout = 'doc';
+  else if (html) meta.layout = 'page';
   else delete meta.layout;
   // 搬运的是本站自己的静态文章：记下原路径，首页据此隐藏英文原版
   if (sourceUrl && new URL(sourceUrl).origin === origin) meta.origPath = new URL(sourceUrl).pathname;
@@ -111,6 +113,10 @@ export async function saveBilingual({ origin, slug, title, blocks, html, source,
   }
 
   if (html) await setText(`html/${meta.slug}`, html);
+  if (tables) {
+    await delPrefix(`tbl/${meta.slug}/`);
+    for (const [key, raw] of Object.entries(tables)) await setText(`tbl/${meta.slug}/${key}`, raw);
+  }
   await setJSON(`doc/${meta.slug}`, { blocks });
   await setJSON(`meta/${meta.slug}`, meta);
   if (next) {
@@ -130,14 +136,14 @@ export const imageExt = (src) => {
 export async function ingestHtml({ origin, html, finalUrl, title, translate, slug, source = 'import' }) {
   let parsed, page = null;
   if (looksPositioned(html)) {
-    parsed = parsePositioned(html, finalUrl);
+    parsed = parsePositioned(html, finalUrl); // 带 tables：文档版式
   } else {
     parsed = parseHtml(html, { annotate: true, images: true, baseUrl: finalUrl });
     if (html.length <= PAGE_LAYOUT_MAX) page = sanitizeRawHtml(parsed.html, finalUrl);
   }
   return saveBilingual({
     origin, slug, title: (title || '').trim() || parsed.title || (finalUrl ? new URL(finalUrl).hostname : ''),
-    blocks: parsed.blocks, html: page, source, sourceUrl: finalUrl, translate,
+    blocks: parsed.blocks, html: page, tables: parsed.tables, source, sourceUrl: finalUrl, translate,
   });
 }
 

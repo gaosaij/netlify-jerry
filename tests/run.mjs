@@ -58,7 +58,7 @@ for (const f of ['It_Helps_to_Ask_-_The_Cumulative_Benefits_of_Asking_Follow-Up_
   const html = samplePositionedHtml();
   assert.ok(looksPositioned(html) && !looksPositioned('<html><body><p>plain</p></body></html>'));
   const r = parsePositioned(html, 'https://example.com/docs/a.htm');
-  const texts = r.blocks.filter((b) => b.k !== 'img');
+  const texts = r.blocks.filter((b) => b.k === 'p' || /^h\d$/.test(b.k));
   assert.equal(r.title, 'Sample Company S-1');
   assert.ok(texts.every((b) => !b.en.includes('Sample Company, Inc.') && !/^\d$/.test(b.en)), '页眉页码被去掉');
   assert.ok(texts.some((b) => b.en.includes('because the surrounding environment of safety research')), '连字符断行接上');
@@ -67,6 +67,18 @@ for (const f of ['It_Helps_to_Ask_-_The_Cumulative_Benefits_of_Asking_Follow-Up_
   const imgs = r.blocks.filter((b) => b.k === 'img');
   assert.deepEqual(imgs.map((b) => [b.src, !!b.big]), [['https://example.com/docs/pg1a.jpg', true], ['https://example.com/docs/chart2a.jpg', false]]);
   assert.ok(texts.length < 30, '每行不再是一个段落');
+  // 样式：标题加粗 14pt，说明斜体 8pt
+  const h1 = texts.find((b) => b.en === '1 Our Mission');
+  assert.deepEqual([h1.st.f, h1.st.sz, h1.st.b, h1.st.c], ['Georgia', 14, 1, '#1a1a1a']);
+  assert.deepEqual([texts.find((b) => b.en.startsWith('Note:')).st.i, texts.find((b) => b.en.startsWith('Note:')).st.sz], [1, 8]);
+  // 表格：原样保留 + 文字单元格单独成块，数字单元格不翻译；表格排在说明之前
+  const tb = r.blocks.find((b) => b.k === 'table');
+  assert.equal(r.blocks.filter((b) => b.k === 'table').length, 1);
+  assert.deepEqual([tb.w, tb.h], [468, 54.75]);
+  assert.ok(r.tables[tb.tkey].startsWith('<table') && r.tables[tb.tkey].includes('background-color:#ecebe3') && r.tables[tb.tkey].includes('Year Ended December 31,'));
+  assert.deepEqual(r.blocks.filter((b) => b.k === 'cell').map((b) => b.en), ['Year Ended December 31,', 'Revenue', 'Compute and infrastructure', 'Net loss']);
+  assert.ok(r.blocks.indexOf(tb) < r.blocks.findIndex((b) => b.en && b.en.startsWith('Note:')), '按纵坐标排序');
+  assert.ok(!texts.some((b) => b.en.includes('Revenue') || b.en.includes('1,056')), '表格里的文字不会混进正文段落');
   assert.equal(parsePositioned(html.replace('1 Our Mission</font>', '1 Our Mission 1 Our Mission</font>')).blocks[0].en, '1 Our Mission', '叠两层造成的整段重复被去掉');
   assert.match(blockedHint('https://www.sec.gov/x.htm', 403), /FETCH_USER_AGENT/);
   assert.equal(blockedHint('https://example.com/x.htm', 403), '');
@@ -237,7 +249,7 @@ meta = await res.json();
 assert.equal(meta.status, 'ocr', '有整页图片，先 OCR');
 meta = await waitDone(meta.slug);
 assert.equal(meta.status, 'done', JSON.stringify(meta));
-assert.ok(!meta.layout, '定位布局的网页不保留原样式');
+assert.equal(meta.layout, 'doc', 'PDF 转 HTML 使用文档版式');
 const batchS1 = [...mineru.batches.values()].pop();
 assert.deepEqual(batchS1.files.map((f) => f.name), ['img-0.jpg'], '只有整页图片交给 OCR，普通图表不交');
 assert.equal(mineru.puts.at(-1).bytes, 7, '服务器抓到图片并传给 MinerU');
@@ -250,7 +262,17 @@ const iOcr = pageHtml.indexOf('Paragraph text from ' + [...mineru.batches.keys()
 assert.ok(iImg > 0 && iOcr > iImg, '图片里识别出的文字放在图片后面');
 assert.ok(pageHtml.includes('[ZH] Paragraph text from') && pageHtml.includes('[ZH] 1 Our Mission'));
 assert.ok(pageHtml.includes('/sample/chart2a.jpg'));
-ok('PDF 转 HTML：还原段落 + 整页图片 OCR（服务器带 UA 抓图）+ 译文，图片文字放回图片后面');
+// 文档版式：页面卡片、原字体样式、原表格 + 中文对照表
+assert.ok(pageHtml.includes('class="pgcard"') && pageHtml.includes('第 1 页'));
+assert.ok(pageHtml.includes(`<h2 class="d dh" style="font-family:'Georgia', serif;font-size:14pt;font-weight:bold;color:#1a1a1a;">1 Our Mission</h2><h2 class="d dh dz" style="font-family:'Georgia', 'Songti SC','Noto Serif CJK SC','SimSun',serif;font-size:14pt;font-weight:bold;color:#1a1a1a;">[ZH] 1 Our Mission</h2>`), '标题保留字体/字号/加粗/颜色，译文紧跟其后，style 属性完整');
+assert.ok(/<p class="d dz" style="font-family:'Georgia', 'Songti SC'[^"]*font-size:9.5pt;color:#17406b;">\[ZH\] We believe/.test(pageHtml), '正文译文有字号和颜色');
+assert.ok(!/style="[^"]*"[a-z]/.test(pageHtml.split('<article>')[1].split('</article>')[0].replace(/<table[\s\S]*?<\/table>/g, '')), 'style 属性里不能出现未转义的双引号');
+assert.ok(pageHtml.includes('<table style="border-collapse:collapse;display:inline-table;width:100%">') && pageHtml.includes('background-color:#ecebe3'), '原表格原样保留');
+assert.ok(pageHtml.includes('position:relative;width:468pt;height:54.75pt'), '表格容器尺寸和原来一致');
+assert.ok(pageHtml.includes('class="zt"') && pageHtml.includes('[ZH] Revenue') && pageHtml.includes('[ZH] Net loss'), '中文对照表');
+assert.ok(pageHtml.includes('<td class="num">100%</td>') && pageHtml.includes('<td class="num">(3,734)</td>'), '数字原样');
+assert.ok(pageHtml.includes('font-style:italic;') && pageHtml.includes('Note: Totals of the table'));
+ok('PDF 转 HTML：文档版式（页面卡片、字体样式）+ 原表格 + 中文对照表 + 整页图片 OCR 放回图片后面');
 
 // 大网页：同步函数处理不了，改走后台导入
 process.env.SYNC_LIMIT_BYTES = '20000';
@@ -264,6 +286,7 @@ assert.equal(meta.title, 'Sample Company S-1 Big');
 pageHtml = await (await fetch(`${origin}/t/${meta.slug}`)).text();
 assert.ok(pageHtml.includes('Variant paragraph'));
 process.env.SYNC_LIMIT_BYTES = '';
+assert.ok(pageHtml.includes('class="zt"'), '大网页同样带表格');
 ok('大网页：先建占位，后台抓取解析，再 OCR 和翻译');
 
 // “仅搬运”：大网页也只保存，不 OCR、不翻译（之前的 bug：大网页的后台导入忽略了这个选项）
