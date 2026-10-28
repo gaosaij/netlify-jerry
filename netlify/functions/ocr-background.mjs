@@ -8,7 +8,7 @@ import { config as translateConfig, autoTranslateMaxChars, pendingChars } from '
 import { fetchHeaders, blockedHint } from './lib/ingest.mjs';
 import { safeFetch } from './lib/safe-fetch.mjs';
 import { kick } from './lib/kick.mjs';
-import { envMs, isLocked, startHeartbeat, touchLock } from './lib/runtime.mjs';
+import { envMs, isLocked, startHeartbeat, touchLock, DeadlineError } from './lib/runtime.mjs';
 import { mineruConfig, createUrlTask, getTask, createUploadBatch, putFile, getBatch, fetchResult } from './lib/mineru.mjs';
 
 const budgetMs = () => envMs('OCR_BUDGET_MS', 12 * 60 * 1000);
@@ -26,14 +26,18 @@ async function pool(items, size, fn) {
 }
 
 // 整页图片：每 6 张一组——并发下载（服务器自己带 User-Agent 抓图，有的网站如 SEC 不允许 MinerU 直接取），
-// 为这一组申请上传地址并并发上传，然后保存进度。可以随时中断、从断点继续（已上传的图片不会重传）；
-// 单张图片下载失败只会让这一张失败，不影响其它。
+// 为这一组申请上传地址并上传，然后保存进度。可以随时中断、从断点继续（已上传的图片不会重传）。
+//   · 单张图片下载失败只会让这一张失败，不影响其它；
+//   · 上传失败（网络错误）：这一组里已经上传成功的先记下并保存，再报错——点“继续识别”只会补传没传完的；
+//   · 上传带截止时间（ctx.deadline），快到平台 15 分钟上限时保存进度并交棒（返回 'handoff'）。
 const GROUP = 6;
 const MAX_IMAGE_BYTES = 40 * 1024 * 1024;
 async function submitImages(o, ctx) {
   o.batches = o.batches || [];
   const todo = o.jobs.filter((j) => !j.batch && j.state !== 'failed');
   for (let i = 0; i < todo.length; i += GROUP) {
+    // 一组最多要几分钟（下载 + 上传 + 重试）：剩余时间不够就先交棒
+    if (ctx.deadline && Date.now() + envMs('OCR_GROUP_MARGIN_MS', 150000) > ctx.deadline) return 'handoff';
     const got = await pool(todo.slice(i, i + GROUP), 3, async (j) => {
       try {
         // 图片地址来自被搬运网页的内容（不可信）：safeFetch 拒绝本机/内网地址，并且只接受图片、限制大小
@@ -51,16 +55,27 @@ async function submitImages(o, ctx) {
       }
     });
     const ok = got.filter(Boolean);
+    let uploadErr = null;
     if (ok.length) {
       const { batchId, urls } = await createUploadBatch(ok.map((g) => ({ name: g.j.name })));
       if (!urls || urls.length !== ok.length) throw new Error('MinerU 返回的上传地址数量不对');
-      await pool(ok, 3, (g, k) => putFile(urls[k], g.buf));
-      o.batches.push({ id: batchId, names: ok.map((g) => g.j.name) });
-      ok.forEach((g) => { g.j.batch = batchId; });
+      const sent = [];
+      await pool(ok, 2, async (g, k) => {
+        if (uploadErr) return; // 已经有一张失败：这一组剩下的先不传了，下次继续
+        try { await putFile(urls[k], g.buf, ctx.deadline); sent.push(g); } catch (e) { uploadErr = uploadErr || e; }
+      });
+      if (sent.length) {
+        o.batches.push({ id: batchId, names: sent.map((g) => g.j.name) });
+        sent.forEach((g) => { g.j.batch = batchId; });
+      }
     }
     ctx.meta.note = `正在把整页图片上传给 MinerU：${o.jobs.filter((j) => j.batch).length} / ${o.jobs.length}`;
     ctx.meta.lockAt = Date.now();
     if (!(await ctx.save())) return 'deleted';
+    if (uploadErr) {
+      if (uploadErr instanceof DeadlineError) return 'handoff';
+      throw new Error(`${uploadErr.message}。已上传 ${o.jobs.filter((j) => j.batch).length} / ${o.jobs.length} 张，点“继续识别”会从断点继续`);
+    }
     if (i + GROUP < todo.length && Date.now() - ctx.started > budgetMs()) return 'handoff';
   }
   return 'done';
@@ -92,9 +107,11 @@ async function submit(o) {
 async function poll(o) {
   let results;
   if (o.mode === 'images') {
-    const all = [];
-    for (const b of o.batches) all.push(...(await getBatch(b.id)));
-    results = o.jobs.map((j, i) => all.find((r) => r.name === j.name) || all[i] || { state: 'waiting-file' });
+    // 只在任务自己所属的批次里按文件名查找：断点续传时，没传上的文件会留在旧批次里（状态是 waiting-file），
+    // 同名的条目不能串到新批次的任务上；也不能按下标兜底（部分任务没有批次，下标对不上）
+    const byBatch = new Map();
+    for (const b of o.batches) byBatch.set(b.id, await getBatch(b.id));
+    results = o.jobs.map((j) => ((byBatch.get(j.batch) || []).find((r) => r.name === j.name)) || { state: 'waiting-file' });
   } else if (o.mode === 'url') {
     results = await Promise.all(o.jobs.map((j) => getTask(j.taskId)));
   } else {
@@ -156,9 +173,14 @@ export default async (req) => {
 
     if (o.mode === 'images') {
       if (!o.jobs.every((j) => j.batch || j.state === 'failed')) {
-        const r = await submitImages(o, { meta, save, started });
+        const r = await submitImages(o, { meta, save, started, deadline: started + envMs('OCR_DEADLINE_MS', 13 * 60 * 1000) });
         if (r === 'deleted') return;
         if (r === 'handoff') { // 时间快到了：保存进度，交给新的一次调用继续上传剩下的图片
+          // 连续几次交棒都没有多传成一张：说明上传太慢（超出单次运行的时间上限），明确报错而不是无限交棒
+          const sentNow = o.jobs.filter((j) => j.batch).length;
+          o.stalls = sentNow > (o.lastSent || 0) ? 0 : (o.stalls || 0) + 1;
+          o.lastSent = sentNow;
+          if (o.stalls >= 3) throw new Error(`上传到 MinerU 太慢：连续 3 次运行都没有在时间上限内多传成一张图片（已上传 ${sentNow} / ${o.jobs.length}）。可能是网络不稳，稍后点“继续识别”重试`);
           meta.lockAt = 0;
           await save();
           await kick(origin, 'ocr-background', slug);

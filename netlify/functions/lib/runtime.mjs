@@ -27,3 +27,13 @@ export async function touchLock(slug, meta) {
   meta.lockAt = Date.now();
   await setJSON(`meta/${slug}`, meta);
 }
+
+// 接近函数运行时间上限：不再发起新的请求/重试，让调用方保存进度后交棒给新的一次运行
+export class DeadlineError extends Error {}
+
+// 网络层错误的说明。undici 的 fetch 失败时只有一句“fetch failed”，真正原因（连接被重置、超时、证书……）在 e.cause 里
+export function describeNetError(e) {
+  const c = e && e.cause;
+  const detail = c ? `${c.code || c.name || ''}${c.message ? ` ${c.message}` : ''}`.trim() : '';
+  return [e && e.message, detail].filter(Boolean).join('：');
+}

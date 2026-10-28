@@ -1,6 +1,7 @@
 // 调用 OpenAI 兼容接口翻译：把若干段英文打成一批，一次请求翻译，用 <<<编号>>> 标记对应关系
 import { needsTranslation } from './parse.mjs';
-import { envMs } from './runtime.mjs';
+import { envMs, DeadlineError } from './runtime.mjs';
+export { DeadlineError };
 
 export function config() {
   return {
@@ -41,8 +42,6 @@ export function makeBatches(blocks, maxChars = 3000, maxItems = 30) {
 }
 
 export class MismatchError extends Error {}
-// 接近函数运行时间上限：不再请求/重试，让调用方保存进度并交棒给新的一次运行
-export class DeadlineError extends Error {}
 
 function parseReply(reply, count) {
   const out = [];

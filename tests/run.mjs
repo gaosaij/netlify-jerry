@@ -580,6 +580,48 @@ ok('大网页：先建占位，后台抓取解析，再 OCR 和翻译');
   ok('文章列表缓存：缓存期内复用，写入立即失效，fresh 强制读最新');
 }
 
+// ---- 上传到 MinerU 失败：重试、报出底层原因、断点续传、截止时间交棒 ----
+{
+  process.env.MINERU_RETRY_BASE_MS = '10';
+  const imp = async (n, tag) => (await (await post('/api/import', { url: `${origin}/sample/multi.htm?tag=${tag}&imgs=${Array.from({ length: n }, (_, i) => `pg${i + 1}a.jpg`).join(',')}`, translate: true })).json());
+  const english = (html) => (html.match(/>Paragraph text from b\d+-\d about habits\./g) || []).length;
+
+  // 1) 短暂的网络失败：自动重试，最终成功
+  stats.putFailTimes = 2;
+  let a = await imp(3, 'RT');
+  a = await waitDone(a.slug, 30000);
+  assert.equal(a.status, 'done', JSON.stringify(a));
+  assert.equal(english(await (await fetch(`${origin}/t/${a.slug}`)).text()), 3);
+
+  // 2) 持续失败（第 2 个文件的连接总是被掐断）：报错里有底层原因和重试次数；已传成功的先保存；继续时只补传剩下的
+  const p0 = mineru.puts.length;
+  stats.putFailIndex = 1;
+  a = await imp(3, 'PF');
+  a = await waitDone(a.slug, 30000);
+  assert.equal(a.status, 'error', JSON.stringify(a));
+  assert.ok(a.error.includes('上传到 MinerU 失败') && a.error.includes('已重试 5 次'), a.error);
+  assert.match(a.error, /(ECONNRESET|other side closed|UND_ERR_SOCKET|socket|terminated)/i, '带上底层原因：' + a.error);
+  assert.ok(a.error.includes('已上传 2 / 3') && a.stage === 'ocr', a.error);
+  assert.equal(mineru.puts.length - p0, 2, '同一组里成功的两张已经传了并保存');
+  stats.putFailIndex = -1;
+  res = await post(`/api/articles/${a.slug}/translate`, {}); // “继续识别”
+  assert.equal(res.status, 200);
+  a = await waitDone(a.slug, 30000);
+  assert.equal(a.status, 'done', JSON.stringify(a));
+  assert.equal(mineru.puts.length - p0, 3, '继续时只补传没传完的那一张，已传的不重传');
+  assert.equal(english(await (await fetch(`${origin}/t/${a.slug}`)).text()), 3, '3 张都识别了');
+
+  // 3) 上传太慢（超过截止时间）：保存进度并交棒；连续 3 次没有进展就明确报错，不会被平台强杀后静默卡住
+  process.env.OCR_DEADLINE_MS = '1500'; process.env.DEADLINE_MARGIN_MS = '100'; process.env.OCR_GROUP_MARGIN_MS = '100';
+  stats.putDelayMs = 2500;
+  a = await imp(1, 'SL');
+  a = await waitDone(a.slug, 40000);
+  stats.putDelayMs = 0; process.env.OCR_DEADLINE_MS = ''; process.env.DEADLINE_MARGIN_MS = ''; process.env.OCR_GROUP_MARGIN_MS = ''; process.env.MINERU_RETRY_BASE_MS = '';
+  assert.equal(a.status, 'error', JSON.stringify(a));
+  assert.ok(a.error.includes('上传到 MinerU 太慢'), a.error);
+  ok('上传到 MinerU：短暂失败自动重试；持续失败报出底层原因并保留进度、继续时只补传剩下的；太慢时交棒并明确报错');
+}
+
 // ---- 互斥：任务运行中不能再启动一个；锁过期才能重试；慢步骤期间锁持续刷新；删除后不会被心跳复活 ----
 {
   const slugs = (await get('/api/articles')).filter((m) => m.status === 'done' && m.kind === 'bilingual');

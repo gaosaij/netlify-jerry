@@ -3,6 +3,7 @@
 //   本地文件：POST /file-urls/batch 拿到上传地址 → PUT 文件 → GET /extract-results/batch/{batch_id}
 //   单个文件限制：200MB、200 页；更长的文档用 page_ranges 分段提交
 import { unzipSync } from 'fflate';
+import { envMs, describeNetError, DeadlineError } from './runtime.mjs';
 
 export const MAX_PAGES_PER_JOB = 200;
 
@@ -17,12 +18,17 @@ export function mineruConfig() {
 // 调用接口；HTTP 非 2xx 或返回 code 不为 0 都当作错误，并带上 MinerU 给的说明
 async function call(path, { method = 'GET', body } = {}) {
   const cfg = mineruConfig();
-  const res = await fetch(cfg.base + path, {
-    method,
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${cfg.token}` },
-    body: body ? JSON.stringify(body) : undefined,
-    signal: AbortSignal.timeout(60000),
-  });
+  let res;
+  try {
+    res = await fetch(cfg.base + path, {
+      method,
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${cfg.token}` },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(60000),
+    });
+  } catch (e) {
+    throw new Error(`连接 MinerU 失败：${describeNetError(e)}`);
+  }
   const text = await res.text();
   let json = null;
   try { json = JSON.parse(text); } catch { /* 不是 JSON */ }
@@ -69,20 +75,32 @@ export async function createUploadBatch(files) {
   return { batchId: data.batch_id, urls: data.file_urls };
 }
 
-// 把文件内容 PUT 到上传地址（不要设置 Content-Type；上传完成后 MinerU 自动开始解析）。失败最多重试 3 次
-export async function putFile(url, buffer) {
+// 把文件内容 PUT 到上传地址（不要设置 Content-Type；上传完成后 MinerU 自动开始解析）。
+// 网络错误和 5xx/429 最多重试 5 次（指数退避）；错误信息里带上底层原因（连接被重置/超时等）。
+// deadline（毫秒时间戳，可选）：超时和退避等待都不会越过它，越过就抛 DeadlineError，由调用方保存进度后交棒。
+export async function putFile(url, buffer, deadline = 0) {
+  const base = envMs('MINERU_RETRY_BASE_MS', 2000);
+  const margin = envMs('DEADLINE_MARGIN_MS', 5000);
+  const attempts = 5;
   let last;
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (deadline && Date.now() + margin > deadline) throw new DeadlineError('接近函数运行时间上限，保存进度后继续上传');
     try {
-      const res = await fetch(url, { method: 'PUT', body: buffer, signal: AbortSignal.timeout(4 * 60 * 1000) });
+      const timeout = Math.max(500, Math.min(4 * 60 * 1000, deadline ? deadline - Date.now() - margin / 2 : Infinity));
+      const res = await fetch(url, { method: 'PUT', body: buffer, signal: AbortSignal.timeout(timeout) });
       if (res.ok) return;
       last = new Error(`上传到 MinerU 失败：HTTP ${res.status}`);
+      if (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) throw Object.assign(last, { fatal: true }); // 签名/权限问题，重试没用
     } catch (e) {
-      last = new Error(`上传到 MinerU 失败：${e.message}`);
+      if (e.fatal) throw e;
+      last = e === last ? e : new Error(`上传到 MinerU 失败：${describeNetError(e)}`);
     }
-    await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+    const wait = base * 2 ** attempt;
+    if (attempt === attempts - 1) break;
+    if (deadline && Date.now() + wait + margin > deadline) throw new DeadlineError('接近函数运行时间上限，保存进度后继续上传');
+    await new Promise((r) => setTimeout(r, wait));
   }
-  throw last;
+  throw new Error(`${last.message}（已重试 ${attempts} 次）`);
 }
 
 export async function getBatch(batchId) {
@@ -92,7 +110,8 @@ export async function getBatch(batchId) {
 
 // 下载结果压缩包，取出 full.md 和 images/ 里的图片
 export async function fetchResult(zipUrl) {
-  const res = await fetch(zipUrl, { signal: AbortSignal.timeout(5 * 60 * 1000) });
+  let res;
+  try { res = await fetch(zipUrl, { signal: AbortSignal.timeout(5 * 60 * 1000) }); } catch (e) { throw new Error(`下载 MinerU 结果失败：${describeNetError(e)}`); }
   if (!res.ok) throw new Error(`下载 MinerU 结果失败：HTTP ${res.status}`);
   const files = unzipSync(new Uint8Array(await res.arrayBuffer()));
   const mdName = Object.keys(files).find((n) => /(^|\/)full\.md$/i.test(n));

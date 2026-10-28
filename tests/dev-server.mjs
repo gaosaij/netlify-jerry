@@ -21,7 +21,7 @@ export async function startDevServer({ port = 0, mockLlm = true } = {}) {
     [`images/img-${key}.jpg`]: new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]),
     'layout.json': strToU8('{}'),
   });
-  const stats = { delayOnce: 0, putDelayMs: 0, imageUAs: [], llmCalls: 0, mismatchOnce: false, rateLimitOnce: false, delayMs: 0 };
+  const stats = { putFailTimes: 0, putFailIndex: -1, delayOnce: 0, putDelayMs: 0, imageUAs: [], llmCalls: 0, mismatchOnce: false, rateLimitOnce: false, delayMs: 0 };
 
   const api = (await import('../netlify/functions/api.mjs')).default;
   const page = (await import('../netlify/functions/page.mjs')).default;
@@ -129,6 +129,12 @@ export async function startDevServer({ port = 0, mockLlm = true } = {}) {
     if (url.pathname.startsWith('/mineru/')) {
       const j = (data, status = 200) => text(JSON.stringify(data), 'application/json', status);
       const m = url.pathname.slice('/mineru'.length);
+      if (m.startsWith('/put/')) {
+        // 模拟网络层失败：直接掐断连接，客户端看到的就是 “fetch failed”
+        const putIdx = Number(m.split('/').pop());
+        if (stats.putFailTimes > 0) { stats.putFailTimes--; nodeReq.socket.destroy(); return; }
+        if (stats.putFailIndex === putIdx) { nodeReq.socket.destroy(); return; }
+      }
       if (m.startsWith('/put/')) { if (stats.putDelayMs) await new Promise((r) => setTimeout(r, stats.putDelayMs)); mineru.puts.push({ path: m, bytes: body.length }); return text('', 'text/plain', 200); }
       if (m.startsWith('/zip/')) {
         nodeRes.writeHead(200, { 'content-type': 'application/zip' });
@@ -160,11 +166,13 @@ export async function startDevServer({ port = 0, mockLlm = true } = {}) {
       if ((mm = m.match(/^\/extract-results\/batch\/(\w+)$/))) {
         const b = mineru.batches.get(mm[1]);
         b.polls++;
-        const uploaded = mineru.puts.filter((p) => p.path.startsWith(`/put/${mm[1]}/`)).length;
-        return j({ code: 0, data: { batch_id: mm[1], extract_result: b.files.map((f, i) => (
-          uploaded < b.files.length ? { file_name: f.name, state: 'waiting-file' }
-            : b.polls < 2 ? { file_name: f.name, state: 'running', extract_progress: { extracted_pages: 2, total_pages: 200 } }
-              : { file_name: f.name, state: 'done', full_zip_url: `${origin}/mineru/zip/${mm[1]}-${i}`, extract_progress: { extracted_pages: 200, total_pages: 200 } })) } });
+        // 逐个文件判断（和真实的 MinerU 一致）：这个文件还没传上就是 waiting-file，传上了才开始处理，互不影响
+        return j({ code: 0, data: { batch_id: mm[1], extract_result: b.files.map((f, i) => {
+          const uploaded = mineru.puts.some((p) => p.path === `/put/${mm[1]}/${i}`);
+          if (!uploaded) return { file_name: f.name, state: 'waiting-file' };
+          if (b.polls < 2) return { file_name: f.name, state: 'running', extract_progress: { extracted_pages: 2, total_pages: 200 } };
+          return { file_name: f.name, state: 'done', full_zip_url: `${origin}/mineru/zip/${mm[1]}-${i}`, extract_progress: { extracted_pages: 200, total_pages: 200 } };
+        }) } });
       }
       return j({ code: -1, msg: 'unknown' }, 404);
     }
