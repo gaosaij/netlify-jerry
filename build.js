@@ -126,5 +126,7 @@ fs.writeFileSync(path.join(OUT, 'index.html'), template.replace('<!--ARTICLES-->
 const index = articles.filter((a) => a.rel.startsWith(`${ARTICLES_DIR}/`))
   .map((a) => ({ title: a.title, href: a.href, translate: a.translate }));
 fs.writeFileSync(path.join(OUT, 'articles-index.json'), JSON.stringify(index));
+// 构建信息：Netlify 构建时提供 COMMIT_REF（本次部署对应的提交），用来在线上核对“部署的是不是最新的提交”
+fs.writeFileSync(path.join(OUT, 'version.json'), JSON.stringify({ commit: process.env.COMMIT_REF || '', builtAt: new Date().toISOString() }));
 console.log(`生成首页：${articles.length} 篇文章`);
 articles.forEach((a) => console.log(`  - ${a.title}  ->  ${a.href}`));
