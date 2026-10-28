@@ -13,6 +13,13 @@ import path from 'node:path';
 
 const localDir = () => process.env.LOCAL_STORE_DIR;
 const localFile = (key) => path.join(localDir(), encodeURIComponent(key));
+// 原子写入：先写临时文件再改名。否则两个并发写入（或写入时同时读取）会读到写了一半的文件
+const TMP = '.__tmp';
+async function writeAtomic(file, data) {
+  const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}${TMP}`;
+  await fs.writeFile(tmp, data);
+  await fs.rename(tmp, file);
+}
 const blobs = () => getStore({ name: 'articles', consistency: 'strong' });
 
 // 文章列表缓存：首页、管理页、查重都要读全部文章的元信息（每篇一次存储读取）。
@@ -34,7 +41,7 @@ export async function setJSON(key, value) {
   if (touchesMeta(key)) { metaCache = null; metaGen++; }
   if (localDir()) {
     await fs.mkdir(localDir(), { recursive: true });
-    return fs.writeFile(localFile(key), JSON.stringify(value));
+    return writeAtomic(localFile(key), JSON.stringify(value));
   }
   return blobs().setJSON(key, value);
 }
@@ -49,7 +56,7 @@ export async function getText(key) {
 export async function setText(key, value) {
   if (localDir()) {
     await fs.mkdir(localDir(), { recursive: true });
-    return fs.writeFile(localFile(key), value);
+    return writeAtomic(localFile(key), value);
   }
   return blobs().set(key, value);
 }
@@ -66,7 +73,7 @@ export async function getBinary(key) {
 export async function setBinary(key, data) {
   if (localDir()) {
     await fs.mkdir(localDir(), { recursive: true });
-    return fs.writeFile(localFile(key), data);
+    return writeAtomic(localFile(key), data);
   }
   return blobs().set(key, data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength));
 }
@@ -87,7 +94,7 @@ export async function del(key) {
 export async function listKeys(prefix) {
   if (localDir()) {
     try {
-      return (await fs.readdir(localDir())).map(decodeURIComponent).filter((k) => k.startsWith(prefix));
+      return (await fs.readdir(localDir())).filter((f) => !f.endsWith(TMP)).map(decodeURIComponent).filter((k) => k.startsWith(prefix));
     } catch { return []; }
   }
   const { blobs: items } = await blobs().list({ prefix });

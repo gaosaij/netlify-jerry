@@ -611,6 +611,21 @@ ok('大网页：先建占位，后台抓取解析，再 OCR 和翻译');
   assert.equal(mineru.puts.length - p0, 3, '继续时只补传没传完的那一张，已传的不重传');
   assert.equal(english(await (await fetch(`${origin}/t/${a.slug}`)).text()), 3, '3 张都识别了');
 
+  // 2.5) 逐张更新进度并显示实测速度（不是每 6 张才更新一次，否则看上去像卡住了）
+  stats.putDelayMs = 250; process.env.MINERU_UPLOAD_CONCURRENCY = '1'; // 并发 1，进度才会一张一张地推进
+  a = await imp(4, 'PN');
+  const notes = new Set();
+  for (;;) {
+    const cur = await getJSON(`meta/${a.slug}`);
+    if (cur.note) notes.add(cur.note);
+    if (['done', 'error'].includes(cur.status)) break;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  stats.putDelayMs = 0; process.env.MINERU_UPLOAD_CONCURRENCY = '';
+  const steps = new Set([...notes].map((n) => (n.match(/MinerU：(\d) \/ 4/) || [])[1]).filter(Boolean));
+  assert.ok(steps.size >= 3, '进度逐张推进：' + [...steps]);
+  assert.ok([...notes].some((n) => /平均每张约 \d+ 秒，单连接约 \d+ KB\/s/.test(n)), '显示实测速度：' + [...notes].join(' | '));
+
   // 3) 上传太慢（超过截止时间）：保存进度并交棒；连续 3 次没有进展就明确报错，不会被平台强杀后静默卡住
   process.env.OCR_DEADLINE_MS = '1500'; process.env.DEADLINE_MARGIN_MS = '100'; process.env.OCR_GROUP_MARGIN_MS = '100';
   stats.putDelayMs = 2500;

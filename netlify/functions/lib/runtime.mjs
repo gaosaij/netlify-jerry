@@ -37,3 +37,14 @@ export function describeNetError(e) {
   const detail = c ? `${c.code || c.name || ''}${c.message ? ` ${c.message}` : ''}`.trim() : '';
   return [e && e.message, detail].filter(Boolean).join('：');
 }
+
+// 串行执行：把多个并发调用排成队，一个接一个执行（用于保存进度——并发的保存没有意义，还可能互相干扰）。
+// 返回的函数和原函数签名一致；前一个失败不会影响后一个。
+export function serialized(fn) {
+  let chain = Promise.resolve();
+  return (...args) => {
+    const run = chain.then(() => fn(...args), () => fn(...args));
+    chain = run.catch(() => {});
+    return run;
+  };
+}

@@ -8,7 +8,7 @@ import { config as translateConfig, autoTranslateMaxChars, pendingChars } from '
 import { fetchHeaders, blockedHint } from './lib/ingest.mjs';
 import { safeFetch } from './lib/safe-fetch.mjs';
 import { kick } from './lib/kick.mjs';
-import { envMs, isLocked, startHeartbeat, touchLock, DeadlineError } from './lib/runtime.mjs';
+import { envMs, isLocked, startHeartbeat, touchLock, serialized, DeadlineError } from './lib/runtime.mjs';
 import { mineruConfig, createUrlTask, getTask, createUploadBatch, putFile, getBatch, fetchResult } from './lib/mineru.mjs';
 
 const budgetMs = () => envMs('OCR_BUDGET_MS', 12 * 60 * 1000);
@@ -30,6 +30,14 @@ async function pool(items, size, fn) {
 //   · 单张图片下载失败只会让这一张失败，不影响其它；
 //   · 上传失败（网络错误）：这一组里已经上传成功的先记下并保存，再报错——点“继续识别”只会补传没传完的；
 //   · 上传带截止时间（ctx.deadline），快到平台 15 分钟上限时保存进度并交棒（返回 'handoff'）。
+// 上传进度说明（含实测速度，方便判断慢在哪里）：o.upN 张、o.upBytes 字节、o.upMs 毫秒（各文件各自耗时的总和，并发时不是墙钟时间）
+const progressNote = (o) => {
+  const sent = o.jobs.filter((j) => j.batch).length;
+  let s = `正在把整页图片上传给 MinerU：${sent} / ${o.jobs.length}`;
+  if (o.upN && o.upMs) s += `（平均每张约 ${Math.max(1, Math.round(o.upMs / o.upN / 1000))} 秒，单连接约 ${Math.round(o.upBytes / 1024 / (o.upMs / 1000))} KB/s）`;
+  return s;
+};
+const uploadConcurrency = () => Math.max(1, envMs('MINERU_UPLOAD_CONCURRENCY', 3));
 const GROUP = 6;
 const MAX_IMAGE_BYTES = 40 * 1024 * 1024;
 async function submitImages(o, ctx) {
@@ -59,17 +67,25 @@ async function submitImages(o, ctx) {
     if (ok.length) {
       const { batchId, urls } = await createUploadBatch(ok.map((g) => ({ name: g.j.name })));
       if (!urls || urls.length !== ok.length) throw new Error('MinerU 返回的上传地址数量不对');
-      const sent = [];
-      await pool(ok, 2, async (g, k) => {
-        if (uploadErr) return; // 已经有一张失败：这一组剩下的先不传了，下次继续
-        try { await putFile(urls[k], g.buf, ctx.deadline); sent.push(g); } catch (e) { uploadErr = uploadErr || e; }
+      // 每传成一张就记录并保存一次：界面逐张更新，中途被打断也不会丢已传好的
+      const entry = { id: batchId, names: [] };
+      o.batches.push(entry);
+      let gone = false;
+      await pool(ok, uploadConcurrency(), async (g, k) => {
+        if (uploadErr || gone) return; // 已经有一张失败：这一组剩下的先不传了，下次继续
+        const t0 = Date.now();
+        try { await putFile(urls[k], g.buf, ctx.deadline); } catch (e) { uploadErr = uploadErr || e; return; }
+        entry.names.push(g.j.name);
+        g.j.batch = batchId;
+        o.upN = (o.upN || 0) + 1; o.upBytes = (o.upBytes || 0) + g.buf.length; o.upMs = (o.upMs || 0) + (Date.now() - t0);
+        ctx.meta.note = progressNote(o);
+        ctx.meta.lockAt = Date.now();
+        if (!(await ctx.save())) gone = true;
       });
-      if (sent.length) {
-        o.batches.push({ id: batchId, names: sent.map((g) => g.j.name) });
-        sent.forEach((g) => { g.j.batch = batchId; });
-      }
+      if (gone) return 'deleted';
+      if (!entry.names.length) o.batches.pop(); // 一张都没传成：不留空批次
     }
-    ctx.meta.note = `正在把整页图片上传给 MinerU：${o.jobs.filter((j) => j.batch).length} / ${o.jobs.length}`;
+    ctx.meta.note = progressNote(o);
     ctx.meta.lockAt = Date.now();
     if (!(await ctx.save())) return 'deleted';
     if (uploadErr) {
@@ -156,12 +172,12 @@ export default async (req) => {
   if (isLocked(meta)) return; // 已有一个识别任务在跑
   const o = meta.ocr;
 
-  const save = async () => {
+  const save = serialized(async () => {
     if (!(await getJSON(`meta/${slug}`))) return false; // 识别途中文章被删了
     meta.updatedAt = Date.now();
     await setJSON(`meta/${slug}`, meta);
     return true;
-  };
+  });
 
   // 心跳：下载/上传很慢的时候也定期刷新锁，避免被误判为已中断而被重复启动
   let stopBeat = () => {};
