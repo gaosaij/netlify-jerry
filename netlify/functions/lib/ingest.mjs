@@ -7,10 +7,12 @@ import {
 import { looksPositioned, parsePositioned } from './positioned.mjs';
 import { config as translateConfig, autoTranslateMaxChars, pendingChars } from './translate.mjs';
 import { mineruConfig } from './mineru.mjs';
+import { externalizeDataUris, hasBigDataUri, singleFileUrl } from './assets.mjs';
 
 export const syncLimit = () => Number(process.env.SYNC_LIMIT_BYTES) || 3 * 1024 * 1024;        // 超过这个大小的网页交给后台函数处理（同步函数有超时限制）
 export const MAX_IMPORT_BYTES = 40 * 1024 * 1024;
-const PAGE_LAYOUT_MAX = 3 * 1024 * 1024;           // 太大的网页不保留原样式（响应体有 6MB 上限），改用通用对照排版
+const PAGE_LAYOUT_MAX = 8 * 1024 * 1024;           // 太大的网页不保留原样式，改用通用对照排版（输出时超过 4MB 会走流式响应，上限 20MB）
+export const MAX_UPLOAD_HTML_BYTES = 80 * 1024 * 1024; // 分块上传的 HTML 文件上限（SingleFile 保存的网页内联了图片，体积很大）
 const MAX_OCR_IMAGES = 80;
 export const MAX_RAW_BYTES = 18 * 1024 * 1024; // “仅搬运”的网页上限：输出时走流式响应，最大 20MB
 
@@ -134,17 +136,31 @@ export const imageExt = (src) => {
 
 // 解析一篇 HTML 并保存。PDF 转出来的网页（逐行绝对定位）按坐标还原段落；普通网页保留原样式
 export async function ingestHtml({ origin, html, finalUrl, title, translate, slug, source = 'import' }) {
-  let parsed, page = null;
-  if (looksPositioned(html)) {
-    parsed = parsePositioned(html, finalUrl); // 带 tables：文档版式
-  } else {
-    parsed = parseHtml(html, { annotate: true, images: true, baseUrl: finalUrl });
-    if (html.length <= PAGE_LAYOUT_MAX) page = sanitizeRawHtml(parsed.html, finalUrl);
+  // SingleFile 保存的网页：文件开头的注释里有原网址，用它做来源和相对链接的基准
+  const sourceUrl = finalUrl || singleFileUrl(html) || undefined;
+  let externalized = false;
+  if (hasBigDataUri(html)) {
+    // 内联的 base64 图片、字体拆出来单独存放，网页只剩文字和样式
+    slug = slug || makeSlug((title || '').trim() || (sourceUrl ? new URL(sourceUrl).hostname : 'page'));
+    html = (await externalizeDataUris(html, slug, origin)).html;
+    externalized = true;
   }
-  return saveBilingual({
-    origin, slug, title: (title || '').trim() || parsed.title || (finalUrl ? new URL(finalUrl).hostname : ''),
-    blocks: parsed.blocks, html: page, tables: parsed.tables, source, sourceUrl: finalUrl, translate,
-  });
+  try {
+    let parsed, page = null;
+    if (looksPositioned(html)) {
+      parsed = parsePositioned(html, sourceUrl); // 带 tables：文档版式
+    } else {
+      parsed = parseHtml(html, { annotate: true, images: true, baseUrl: sourceUrl });
+      if (html.length <= PAGE_LAYOUT_MAX) page = sanitizeRawHtml(parsed.html, sourceUrl);
+    }
+    return await saveBilingual({
+      origin, slug, title: (title || '').trim() || parsed.title || (sourceUrl ? new URL(sourceUrl).hostname : ''),
+      blocks: parsed.blocks, html: page, tables: parsed.tables, source, sourceUrl, translate,
+    });
+  } catch (e) {
+    if (externalized) await delPrefix(`img/${slug}/`); // 失败（如重复文章）时不留下孤立的图片
+    throw e;
+  }
 }
 
 // 大网页的轻量清理：不用 DOM 解析（十几 MB 的网页会占用太多内存），只去掉脚本、加 <base> 和返回链接。

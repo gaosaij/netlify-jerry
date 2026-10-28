@@ -12,7 +12,8 @@ import {
   parseByFormat, blocksFromClient, makeSlug, validSlug,
 } from './lib/parse.mjs';
 import { config as translateConfig } from './lib/translate.mjs';
-import { fetchPage, ingestHtml, saveBilingual, saveRaw, syncLimit } from './lib/ingest.mjs';
+import { fetchPage, ingestHtml, saveBilingual, saveRaw, syncLimit, MAX_UPLOAD_HTML_BYTES } from './lib/ingest.mjs';
+import { ASSET_TYPES } from './lib/assets.mjs';
 
 // 公开列表里只给必要字段
 const publicMeta = (m) => ({
@@ -70,10 +71,12 @@ async function route(req, path) {
   if (req.method === 'GET' && a === 'img' && validSlug(slug) && /^[\w.-]+$/.test(path[2] || '')) {
     const data = await getBinary(`img/${slug}/${path[2]}`);
     if (!data) return json({ error: '图片不存在' }, 404);
-    const types = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp' };
+    const ext = path[2].split('.').pop().toLowerCase();
     return new Response(data, { headers: {
-      'content-type': types[path[2].split('.').pop().toLowerCase()] || 'application/octet-stream',
+      'content-type': ASSET_TYPES[ext] || 'application/octet-stream',
       'cache-control': 'public, max-age=86400', 'x-content-type-options': 'nosniff',
+      // SVG 里可能带脚本：直接打开时不让它执行（作为 <img> 或 CSS 背景使用不受影响）
+      'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; sandbox",
     } });
   }
 
@@ -86,8 +89,8 @@ async function route(req, path) {
     return json({ hasKey: !!c.key, base: c.base, model: c.model, hasMineru: !!mineruConfig().token, mineruModel: mineruConfig().model });
   }
 
-  // PDF 分块上传：浏览器每次发一块（≤4MB，二进制），全部传完再调用 /api/ocr/start
-  if (req.method === 'POST' && a === 'ocr' && slug === 'chunk') {
+  // 分块上传（PDF、大 HTML 都用）：浏览器每次发一块（≤4MB，二进制），全部传完再调用 /api/ocr/start（PDF）或 /api/upload/start（HTML）
+  if (req.method === 'POST' && (a === 'ocr' || a === 'upload') && slug === 'chunk') {
     const q = new URL(req.url).searchParams;
     const id = q.get('id') || '';
     const n = Number(q.get('n'));
@@ -102,6 +105,28 @@ async function route(req, path) {
     if (!/^[a-z0-9-]{8,64}$/.test(uploadId) || !Number.isInteger(chunks) || chunks < 1 || chunks > 100) return json({ error: '参数不正确' }, 400);
     if (!(await getBinary(`pdf/${uploadId}/${chunks - 1}`))) return json({ error: 'PDF 还没有上传完整' }, 400);
     const meta = await createOcrArticle({ origin, title, uploadId, chunks, filename, pages: Number(pages) || 0, translate });
+    return json(publicMeta(meta), 201);
+  }
+
+  if (req.method === 'POST' && a === 'upload' && slug === 'start') {
+    // 大 HTML（如 SingleFile 保存的网页）：分块传完后建一个占位，交给后台函数拼接、拆出内联图片、解析、翻译
+    const { uploadId = '', chunks = 0, filename = 'page.html', title = '', translate = true } = await req.json();
+    if (!/^[a-z0-9-]{8,64}$/.test(uploadId) || !Number.isInteger(chunks) || chunks < 1 || chunks > Math.ceil(MAX_UPLOAD_HTML_BYTES / (4 * 1024 * 1024))) {
+      return json({ error: `参数不正确，或文件超过 ${Math.round(MAX_UPLOAD_HTML_BYTES / 1048576)}MB` }, 400);
+    }
+    if (!(await getBinary(`pdf/${uploadId}/${chunks - 1}`))) return json({ error: '文件还没有上传完整' }, 400);
+    const name = filename.replace(/\.[^.]+$/, '').replace(/[_]+/g, ' ');
+    const now = Date.now();
+    const meta = {
+      slug: makeSlug(title.trim() || name), kind: 'bilingual', source: 'upload', title: title.trim() || name,
+      status: 'importing', total: 0, done: 0, createdAt: now, updatedAt: now,
+      ingest: { mode: 'upload', uploadId, chunks, filename, translate, title },
+    };
+    await setJSON(`doc/${meta.slug}`, { blocks: [] });
+    await setJSON(`meta/${meta.slug}`, meta);
+    try { await kick(origin, 'ingest-background', meta.slug); } catch (e) {
+      meta.status = 'error'; meta.error = e.message; await setJSON(`meta/${meta.slug}`, meta);
+    }
     return json(publicMeta(meta), 201);
   }
 
@@ -182,6 +207,7 @@ async function route(req, path) {
       await Promise.all([
         del(`meta/${slug}`), del(`doc/${slug}`), del(`html/${slug}`), delPrefix(`img/${slug}/`), delPrefix(`tbl/${slug}/`),
         meta.ocr && meta.ocr.uploadId ? delPrefix(`pdf/${meta.ocr.uploadId}/`) : null,
+        meta.ingest && meta.ingest.uploadId ? delPrefix(`pdf/${meta.ingest.uploadId}/`) : null,
       ]);
       return json({ ok: true });
     }

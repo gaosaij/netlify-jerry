@@ -82,6 +82,7 @@
 
     <section>
       <h2>上传英文文章（.html / .md / .txt / .pdf，或直接粘贴文本）</h2>
+      <div class="cfg">SingleFile 保存的网页（.html，图片已内联）也可以直接上传，最大 80MB；超过 3MB 会自动分块上传，图片、字体会拆出来单独保存。</div>
       <label for="file">选择文件</label>
       <input type="file" id="file" accept=".html,.htm,.md,.markdown,.txt,.pdf"> <!-- PDF：accept 里的 .pdf -->
       <label for="text">或粘贴文章文本</label>
@@ -299,13 +300,13 @@ async function countPages(file) {
   } catch { return 0; }
 }
 // 把 PDF 按 4MB 分块传给服务器（Netlify 单次请求上限 6MB），再由后台交给 MinerU
-async function uploadPdfChunks(file) {
+async function uploadChunks(file, label, maxMb) {
   const id = 'upload-' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
   const size = 4 * 1024 * 1024;
   const chunks = Math.max(1, Math.ceil(file.size / size));
-  if (chunks > 50) throw new Error('PDF 超过 200MB，MinerU 无法处理');
+  if (file.size > maxMb * 1024 * 1024) throw new Error(label + '超过 ' + maxMb + 'MB，无法处理');
   for (let i = 0; i < chunks; i++) {
-    say('uploadMsg', '正在上传 PDF：' + (i + 1) + ' / ' + chunks);
+    say('uploadMsg', '正在上传' + label + '：' + (i + 1) + ' / ' + chunks);
     const res = await fetch('/api/ocr/chunk?id=' + id + '&n=' + i, {
       method: 'POST', headers: { 'x-admin-password': getPwd() }, body: file.slice(i * size, (i + 1) * size),
     });
@@ -313,6 +314,7 @@ async function uploadPdfChunks(file) {
   }
   return { id, chunks };
 }
+const uploadPdfChunks = (file) => uploadChunks(file, ' PDF', 200);
 async function extractPdf(file) {
   await loadPdfJs();
   if (!window.PdfLayout) await loadScript('/admin/pdf-layout.js');
@@ -335,6 +337,18 @@ $('uploadBtn').onclick = async () => {
   say('uploadMsg', '正在上传…');
   try {
     const payload = { filename: f ? f.name : 'pasted.txt', title: $('title').value, translate: $('autoTr').checked };
+    if (f && /\.html?$/i.test(f.name) && f.size > 3 * 1024 * 1024) {
+      // 大 HTML（如 SingleFile 保存的网页，图片已内联）：分块上传，后台拆出图片、解析、翻译
+      const up = await uploadChunks(f, '网页', 80);
+      const m = await api('upload/start', { method: 'POST', body: JSON.stringify({
+        uploadId: up.id, chunks: up.chunks, filename: f.name, title: $('title').value, translate: $('autoTr').checked,
+      }) });
+      resultMsg('uploadMsg', m, $('autoTr').checked);
+      $('file').value = ''; $('title').value = '';
+      $('uploadBtn').disabled = false;
+      refresh();
+      return;
+    }
     if (f && /\.pdf$/i.test(f.name) && $('useOcr').checked) {
       // PDF + MinerU：整个文件交给 MinerU 识别（可识别扫描版），识别完自动翻译
       const pages = await countPages(f);

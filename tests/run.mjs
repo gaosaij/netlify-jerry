@@ -9,6 +9,9 @@ import { makePdf, samplePages } from './make-pdf.mjs';
 import { samplePositionedHtml } from './make-positioned.mjs';
 import { looksPositioned, parsePositioned } from '../netlify/functions/lib/positioned.mjs';
 import { blockedHint } from '../netlify/functions/lib/ingest.mjs';
+import { externalizeDataUris, singleFileUrl } from '../netlify/functions/lib/assets.mjs';
+import { getJSON, getText } from '../netlify/functions/lib/store.mjs';
+import { randomBytes } from 'node:crypto';
 const { buildBlocks } = createRequire(import.meta.url)('../netlify/functions/lib/pdf-layout.cjs');
 
 let passed = 0;
@@ -100,6 +103,7 @@ for (const f of ['It_Helps_to_Ask_-_The_Cumulative_Benefits_of_Asking_Follow-Up_
 
 // ---- 端到端 ----
 let before2;
+const tokenBackup = 'mtoken';
 const { origin, stats, mineru, close } = await startDevServer();
 const H = { 'content-type': 'application/json', 'x-admin-password': 'test-pass' };
 const post = (p, body, headers = H) => fetch(origin + p, { method: 'POST', headers, body: JSON.stringify(body) });
@@ -314,6 +318,78 @@ ok('大网页：先建占位，后台抓取解析，再 OCR 和翻译');
   assert.ok(meta.note.includes('没有识别'), meta.note);
   assert.equal(mineru.batches.size, batchesBefore, '没选翻译就不 OCR');
   ok('仅搬运（含大网页）不 OCR、不翻译；不自动翻译的上传也不 OCR');
+}
+
+// ---- 大 HTML 分块上传（SingleFile 保存的网页：图片、字体以 base64 内联）----
+{
+  const font = randomBytes(40000), img1 = randomBytes(1500000), img2 = randomBytes(1500000), img3 = randomBytes(1500000);
+  const svgText = '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script>' + '<rect width="1" height="1"/>'.repeat(120) + '</svg>';
+  const small = Buffer.from('tiny').toString('base64');
+  const html = `<!DOCTYPE html>\n<!--\n Page saved with SingleFile \n url: https://example.com/blog/post \n saved date: Wed Oct 28 2026\n-->\n<html><head><meta charset="utf-8"><title>SingleFile Post</title><style>@font-face{font-family:X;src:url(data:font/woff2;base64,${font.toString('base64')}) format('woff2')} body{font-family:X,serif;color:#222}</style></head><body><h1>SingleFile Post</h1><p>English paragraph one that should be translated into Chinese.</p><img src="data:image/png;base64,${img1.toString('base64')}" alt="a"><p>Second paragraph about the same subject matter.</p><img src="data:image/jpeg;base64,${img2.toString('base64')}" alt="b"><img src="data:image/png;base64,${img1.toString('base64')}" alt="same as first"><img src="data:image/gif;base64,${small}" alt="tiny"><img src="data:image/svg+xml;base64,${Buffer.from(svgText).toString('base64')}" alt="svg"><img src="data:image/png;base64,${img3.toString('base64')}" style="width:612pt;height:792pt" alt="page"></body></html>`;
+  assert.ok(html.length > 6 * 1024 * 1024, '测试页应超过 6MB');
+  assert.equal(singleFileUrl(html), 'https://example.com/blog/post');
+
+  const raw = Buffer.from(html);
+  const id = 'upload-sf000001';
+  const size = 2 * 1024 * 1024;
+  const n = Math.ceil(raw.length / size);
+  for (let i = 0; i < n; i++) {
+    const r = await fetch(`${origin}/api/upload/chunk?id=${id}&n=${i}`, { method: 'POST', headers: { 'x-admin-password': 'test-pass' }, body: raw.subarray(i * size, (i + 1) * size) });
+    assert.equal(r.status, 200);
+  }
+  const llmBefore2 = stats.llmCalls, batchesBefore2 = mineru.batches.size;
+  process.env.MINERU_API_TOKEN = '';            // 这一段不测 OCR，避免整页大图触发
+  assert.equal((await post('/api/upload/start', { uploadId: id, chunks: 9999, filename: 'x.html' })).status, 400);
+  res = await post('/api/upload/start', { uploadId: id, chunks: n, filename: 'post.singlefile.html', translate: true });
+  assert.equal(res.status, 201, await res.clone().text());
+  meta = await res.json();
+  assert.equal(meta.status, 'importing');
+  meta = await waitDone(meta.slug);
+  process.env.MINERU_API_TOKEN = tokenBackup;
+  assert.equal(meta.status, 'done', JSON.stringify(meta));
+  assert.equal(meta.title, 'SingleFile Post');
+  assert.equal(meta.layout, 'page');
+  assert.ok(stats.llmCalls > llmBefore2 && mineru.batches.size === batchesBefore2);
+  const sfPage = await (await fetch(`${origin}/t/${meta.slug}`)).text();
+  assert.ok(!sfPage.includes('base64,') || sfPage.includes('data:image/gif;base64,'), '大的内联资源都已拆出（只剩小图标）');
+  assert.ok(sfPage.length < 30000, '页面只剩文字和样式：' + sfPage.length);
+  assert.ok(sfPage.includes('font-family:X') && sfPage.includes('[ZH] English paragraph one'), '样式保留，译文已插入');
+  const base = `${origin}/api/img/${meta.slug}/`;
+  assert.ok(sfPage.includes(`url(${base}d0.woff2)`), '字体改为本站地址');
+  assert.ok(sfPage.includes(`${base}d1.png`) && sfPage.includes(`${base}d2.jpg`));
+  // 同一张图出现两次只存一份；资源内容与原文件一致
+  const names = [...sfPage.matchAll(/\/api\/img\/[\w-]+\/(d\d+\.\w+)/g)].map((m) => m[1]);
+  assert.equal(new Set(names).size, 5, '字体 + png + jpg + svg + 整页 png，共 5 份：' + [...new Set(names)]);
+  const fetchAsset = async (name) => { const r = await fetch(base + name); return { r, bytes: Buffer.from(await r.arrayBuffer()) }; };
+  let a = await fetchAsset('d0.woff2');
+  assert.ok(a.bytes.equals(font) && a.r.headers.get('content-type') === 'font/woff2');
+  a = await fetchAsset('d1.png');
+  assert.ok(a.bytes.equals(img1) && a.r.headers.get('content-type') === 'image/png');
+  a = await fetchAsset('d2.jpg');
+  assert.ok(a.bytes.equals(img2) && a.r.headers.get('content-type') === 'image/jpeg');
+  a = await fetchAsset('d3.svg');
+  assert.equal(a.r.headers.get('content-type'), 'image/svg+xml');
+  assert.match(a.r.headers.get('content-security-policy'), /sandbox/, 'SVG 直接打开时被沙箱限制');
+  assert.ok(fs.readdirSync(process.env.LOCAL_STORE_DIR).every((f) => !f.startsWith('pdf%2Fupload-sf000001')), '上传分块已清理');
+  assert.ok((await getText(`html/${meta.slug}`)).length < 30000, '存储的网页很小');
+
+  // 来源网址取自 SingleFile 的注释；相同内容再传一次会被识别为重复，并且不留下孤立图片
+  assert.equal((await getJSON(`meta/${meta.slug}`)).sourceUrl, 'https://example.com/blog/post', '来源网址取自 SingleFile 的注释');
+  const id2 = 'upload-sf000002';
+  for (let i = 0; i < n; i++) await fetch(`${origin}/api/upload/chunk?id=${id2}&n=${i}`, { method: 'POST', headers: { 'x-admin-password': 'test-pass' }, body: raw.subarray(i * size, (i + 1) * size) });
+  process.env.MINERU_API_TOKEN = '';
+  const dup2 = await (await post('/api/upload/start', { uploadId: id2, chunks: n, filename: 'again.html', translate: true })).json();
+  const dupDone = await waitDone(dup2.slug);
+  process.env.MINERU_API_TOKEN = tokenBackup;
+  assert.equal(dupDone.status, 'error');
+  assert.ok(dupDone.error.includes('已经存在'), dupDone.error);
+  assert.ok(fs.readdirSync(process.env.LOCAL_STORE_DIR).every((f) => !f.startsWith(`img%2F${dup2.slug}`)), '重复文章不留孤立图片');
+
+  // 删除文章时一并删掉拆出来的图片
+  assert.equal((await fetch(`${origin}/api/articles/${meta.slug}`, { method: 'DELETE', headers: H })).status, 200);
+  assert.equal((await fetch(base + 'd1.png')).status, 404);
+  assert.equal((await fetch(`${origin}/api/articles/${dup2.slug}`, { method: 'DELETE', headers: H })).status, 200);
+  ok('大 HTML 分块上传：拼接、拆出内联图片/字体（去重）、样式保留、译文插入、来源网址、重复识别、清理');
 }
 
 // SEC 式限制：没有联系方式的 User-Agent 被拒；设置 FETCH_USER_AGENT 后可以
