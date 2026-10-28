@@ -171,7 +171,8 @@ export async function startDevServer({ port = 0, mockLlm = true } = {}) {
       if (stats.rateLimitOnce) { stats.rateLimitOnce = false; return text('{"error":"rate"}', 'application/json', 429); }
       const user = JSON.parse(body).messages[1].content;
       const parts = [...user.matchAll(/<<<(\d+)>>>\n([\s\S]*?)(?=\n\n<<<\d+>>>|$)/g)];
-      let out = parts.map((m) => `<<<${m[1]}>>>\n[ZH] ${m[2]}`);
+      // 以 KEEP: 开头的段落模拟“原样返回”（人名、DOI 等）；其余加上几个中文字，表示真的翻译了
+      let out = parts.map((m) => `<<<${m[1]}>>>\n${m[2].startsWith('KEEP:') ? m[2] : `[ZH] ${m[2]} 中文译文`}`);
       if (stats.mismatchOnce && parts.length > 1) { stats.mismatchOnce = false; out = out.slice(0, -1); }
       return text(JSON.stringify({ choices: [{ message: { content: out.join('\n\n') } }] }), 'application/json');
     }

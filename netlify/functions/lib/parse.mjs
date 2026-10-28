@@ -29,6 +29,19 @@ export function mkBlock(k, en, extra = {}) {
 
 export const needsTranslation = (b) => !b.s && !b.zh;
 
+// 译文值不值得显示？人名、期刊信息、DOI、网址、参考文献这类内容，模型常常原样返回（或只换了标点、加一两个“和”），
+// 再显示一遍是重复。判断：译文里没有中文字符 / 与原文只差标点大小写 / 只有 1～2 个中文字符而其余几乎都是英文，都不显示。
+// 短而真实的译文（“摘要”“表 1”）中文占比高，不受影响。
+const squash = (t) => t.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+export function showZh(b) {
+  if (!b.zh || b.s) return false;
+  const c = (b.zh.match(CJK) || []).length;
+  if (!c) return false;
+  if (squash(b.zh) === squash(b.en)) return false;
+  const l = (b.zh.match(LATIN) || []).length;
+  return !(c < 3 && c / (c + l) < 0.2);
+}
+
 export function parseMarkdown(src) {
   const lines = src.replace(/\r\n?/g, '\n').split('\n');
   const blocks = [];

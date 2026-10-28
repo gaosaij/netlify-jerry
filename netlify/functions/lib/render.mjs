@@ -1,6 +1,7 @@
 // 渲染中英对照页：一段英文、一段中文；翻译未完成时顶部显示进度并自动刷新
 import { Marked } from 'marked';
 import * as cheerio from 'cheerio';
+import { showZh } from './parse.mjs';
 import { VIEWMODE_CSS, viewModeHeadScript, viewModeBodyScript, showViewMode } from './viewmode.mjs';
 
 export const esc = (s) =>
@@ -44,7 +45,7 @@ function blockHtml(b) {
   const tag = isHeading ? b.k : b.k === 'quote' ? 'blockquote' : 'p';
   const cls = b.k === 'li' ? ' li' : '';
   const en = `<${tag} class="en${cls}">${inline(b, b.en)}</${tag}>`;
-  if (b.s || !b.zh) return `<section class="pair">${en}</section>`;
+  if (!showZh(b)) return `<section class="pair">${en}</section>`;
   return `<section class="pair">${en}<${tag} class="zh${cls}">${inline(b, b.zh)}</${tag}></section>`;
 }
 
@@ -207,7 +208,7 @@ export function renderStyledPage(meta, doc, html, nonce) {
   const byId = new Map();
   $('[data-tid]').each((_, el) => byId.set(el.attribs['data-tid'], el));
   doc.blocks.forEach((b, i) => {
-    if (!b.zh || b.s) return;
+    if (!showZh(b)) return;
     const el = byId.get(String(i));
     if (!el) return;
     const $el = $(el);
@@ -294,7 +295,7 @@ const NUMERIC = /^[\s$()\d,.%—–-]+$/;
 
 // 中文对照表：按原表格的行列生成；文字单元格显示译文（没翻译完就先显示原文），数字原样；全空的列去掉
 function zhTable(b, blocks) {
-  const text = (c) => (c[1] != null ? (blocks[c[1]].zh || blocks[c[1]].en) : c[0] || '');
+  const text = (c) => (c[1] != null ? (showZh(blocks[c[1]]) ? blocks[c[1]].zh : blocks[c[1]].en) : c[0] || '');
   const grid = b.rows.map((r) => { let col = 0; return r.map((c) => { const o = { c, c0: col, span: c[2] || 1 }; col += o.span; return o; }); });
   const used = new Set();
   grid.forEach((r) => r.forEach((o) => { if (text(o.c)) for (let k = 0; k < o.span; k++) used.add(o.c0 + k); }));
@@ -329,7 +330,7 @@ function docBlockHtml(b, blocks, tables) {
   const tag = /^h[1-6]$/.test(b.k) ? b.k : 'p';
   const cls = tag === 'p' ? 'd' : 'd dh';
   const en = `<${tag} class="${cls}" style="${docCss(b.st, false)}">${inline(b, b.en)}</${tag}>`;
-  if (b.s || !b.zh) return en;
+  if (!showZh(b)) return en;
   return en + `<${tag} class="${cls} dz" style="${docCss(b.st || { sz: 9.5 }, true)}">${inline(b, b.zh)}</${tag}>`;
 }
 

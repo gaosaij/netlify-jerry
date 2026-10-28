@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { startDevServer } from './dev-server.mjs';
 import { createRequire } from 'node:module';
+import { showZh } from '../netlify/functions/lib/parse.mjs';
 import { parseMarkdown, parseHtml, analyze } from '../netlify/functions/lib/parse.mjs';
 import { renderStyledPage } from '../netlify/functions/lib/render.mjs';
 import { makePdf, samplePages } from './make-pdf.mjs';
@@ -40,11 +41,28 @@ for (const f of ['It_Helps_to_Ask_-_The_Cumulative_Benefits_of_Asking_Follow-Up_
   const info = analyze(parsed.blocks);
   assert.equal(info.alreadyChinese, false);
   assert.equal((parsed.html.match(/data-tid="/g) || []).length, info.total);
-  parsed.blocks.forEach((b) => { if (!b.s) b.zh = '[ZH] ' + b.en; });
+  parsed.blocks.forEach((b) => { if (!b.s) b.zh = '[ZH] ' + b.en + ' 中文译文'; });
   const t0 = Date.now();
   const out = renderStyledPage({ status: 'done', total: info.total, done: info.total, updatedAt: 1 }, { blocks: parsed.blocks }, parsed.html, 'n');
   assert.equal((out.match(/class="[^"]*zh-tr/g) || []).length, info.total);
   ok(f.slice(0, 20) + '… 样式版渲染：' + info.total + ' 段，' + (Date.now() - t0) + 'ms');
+}
+
+// 译文值不值得显示：人名、DOI、参考文献这类原样返回的内容不再重复显示一遍
+{
+  const z = (en, zh) => showZh({ en, zh });
+  assert.equal(z('2019, Vol. 117, No. 6, 1139–1144 http://dx.doi.org/10.1037/pspi0000220', '2019, Vol. 117, No. 6, 1139–1144 http://dx.doi.org/10.1037/pspi0000220'), false, '原样返回');
+  assert.equal(z('Julia Minson, Harvard Kennedy School of Government', 'Julia Minson，Harvard Kennedy School of Government'), false, '只换了标点');
+  assert.equal(z('Michael Yeomans, Alison Wood Brooks, and Karen Huang Harvard Business School', 'Michael Yeomans、Alison Wood Brooks 和 Karen Huang，Harvard Business School'), false, '只多了一个“和”');
+  assert.equal(z('© 2019 American Psychological Association ISSN: 0022-3514', '© 2019 American Psychological Association ISSN: 0022-3514'), false);
+  assert.equal(z('Abstract', '摘要'), true, '短而真实的译文要显示');
+  assert.equal(z('Table 1', '表 1'), true);
+  assert.equal(z('Introduction to lme4', 'lme4 简介'), true);
+  assert.equal(z('Kenny, D. A., & La Voie, L. (1984). The Social Relations Model. Advances in Experimental Social Psychology, 18, 141–182.', 'Kenny, D. A., & La Voie, L. (1984). 社会关系模型. Advances in Experimental Social Psychology, 18, 141–182.'), true, '参考文献里翻译了标题的要显示');
+  assert.equal(z('Despite the rapid adoption of LLM chatbots, little is known about how they are used.', '尽管大语言模型聊天机器人迅速普及，但人们对它们如何被使用知之甚少。'), true);
+  assert.equal(showZh({ en: 'x', zh: '' }), false);
+  assert.equal(showZh({ en: 'x', zh: '译文', s: 1 }), false);
+  ok('译文显示规则：原样返回/只换标点/只多一两个字不显示，短而真实的译文和翻译了标题的参考文献要显示');
 }
 
 // 公式：MathML 的渲染文字和 LaTeX 注释不能叠在一起，统一取 LaTeX
@@ -268,7 +286,7 @@ assert.ok(pageHtml.includes('[ZH] Paragraph text from') && pageHtml.includes('[Z
 assert.ok(pageHtml.includes('/sample/chart2a.jpg'));
 // 文档版式：页面卡片、原字体样式、原表格 + 中文对照表
 assert.ok(pageHtml.includes('class="pgcard"') && pageHtml.includes('第 1 页'));
-assert.ok(pageHtml.includes(`<h2 class="d dh" style="font-family:'Georgia', serif;font-size:14pt;font-weight:bold;color:#1a1a1a;">1 Our Mission</h2><h2 class="d dh dz" style="font-family:'Georgia', 'Songti SC','Noto Serif CJK SC','SimSun',serif;font-size:14pt;font-weight:bold;color:#1a1a1a;">[ZH] 1 Our Mission</h2>`), '标题保留字体/字号/加粗/颜色，译文紧跟其后，style 属性完整');
+assert.ok(pageHtml.includes(`<h2 class="d dh" style="font-family:'Georgia', serif;font-size:14pt;font-weight:bold;color:#1a1a1a;">1 Our Mission</h2><h2 class="d dh dz" style="font-family:'Georgia', 'Songti SC','Noto Serif CJK SC','SimSun',serif;font-size:14pt;font-weight:bold;color:#1a1a1a;">[ZH] 1 Our Mission 中文译文</h2>`), '标题保留字体/字号/加粗/颜色，译文紧跟其后，style 属性完整');
 assert.ok(/<p class="d dz" style="font-family:'Georgia', 'Songti SC'[^"]*font-size:9.5pt;color:#17406b;">\[ZH\] We believe/.test(pageHtml), '正文译文有字号和颜色');
 assert.ok(!/style="[^"]*"[a-z]/.test(pageHtml.split('<article>')[1].split('</article>')[0].replace(/<table[\s\S]*?<\/table>/g, '')), 'style 属性里不能出现未转义的双引号');
 assert.ok(pageHtml.includes('<table style="border-collapse:collapse;display:inline-table;width:100%">') && pageHtml.includes('background-color:#ecebe3'), '原表格原样保留');
@@ -340,6 +358,32 @@ ok('大网页：先建占位，后台抓取解析，再 OCR 和翻译');
   const skipHtml = await (await fetch(`${origin}/t/${skipSlug}`)).text();
   assert.ok(!skipHtml.includes('vm-toggle'), '已有中文的文章不需要切换按钮');
   ok('“中英对照 / 仅英文”按钮：通用排版、保留原样式、PDF 文档版式都有，已有中文的文章没有');
+}
+
+// ---- 原样返回的段落（人名、DOI…）不重复显示：三种版式 ----
+{
+  const doi = 'KEEP: 2019, Vol. 117, No. 6, 1139–1144 http://dx.doi.org/10.1037/pspi0000220';
+  const count = (html, t) => html.split(t).length - 1;
+  // 通用对照排版
+  meta = await (await post('/api/upload', { filename: 'keep.md', content: `# Keep test\n\nA normal paragraph that should really be translated.\n\n${doi}`, translate: true })).json();
+  await waitDone(meta.slug);
+  let page = await (await fetch(`${origin}/t/${meta.slug}`)).text();
+  assert.equal(count(page, 'KEEP: 2019, Vol. 117'), 1, '通用排版：DOI 只出现一次');
+  assert.ok(page.includes('[ZH] A normal paragraph') && page.includes('中文译文'), '正常段落有译文');
+  // 保留原样式
+  meta = await (await post('/api/upload', { filename: 'keep.html', content: `<html><head><title>Keep Styled</title></head><body><p>A different normal paragraph for the styled layout test.</p><p>${doi}</p></body></html>`, translate: true })).json();
+  await waitDone(meta.slug);
+  page = await (await fetch(`${origin}/t/${meta.slug}`)).text();
+  assert.equal(count(page, 'KEEP: 2019, Vol. 117'), 1, '保留样式：DOI 只出现一次');
+  assert.equal(count(page, 'class="zh-tr"'), 1, '只有正常段落有译文元素');
+  // PDF 文档版式
+  const kp = samplePositionedHtml([]).replace('Filler paragraph 1 describes', 'KEEP: Filler paragraph 1 describes');
+  assert.ok(kp !== samplePositionedHtml([]));
+  meta = await (await post('/api/upload', { filename: 'keep-doc.html', content: kp.replace('Sample Company S-1', 'Sample Company S-1 Keep'), translate: true })).json();
+  await waitDone(meta.slug);
+  page = await (await fetch(`${origin}/t/${meta.slug}`)).text();
+  assert.equal(count(page, 'KEEP: Filler paragraph 1 describes'), 1, '文档版式：原样返回的段落只出现一次');
+  ok('原样返回的段落（人名、DOI 等）在三种版式里都只显示一次');
 }
 
 // ---- 站内文章的“原路径”：Netlify 会把 .html 地址跳转成小写、无后缀的地址 ----
