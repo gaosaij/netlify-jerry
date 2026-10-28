@@ -211,12 +211,17 @@ export function analyze(blocks) {
     else if (/[A-Za-z]/.test(b.en)) en++;
     if (needsTranslation(b)) toTranslate++;
   }
-  const alreadyChinese = zh + en === 0 || zh / (zh + en) >= 0.2 || cjkRatio(all.join(' ')) >= 0.12;
+  // 完全没有文字块（如整页都是图片的网页）不能算“已有中文”：文字在图片里，需要 OCR
+  const alreadyChinese = zh + en > 0 && (zh / (zh + en) >= 0.2 || cjkRatio(all.join(' ')) >= 0.12);
   return { zhBlocks: zh, enBlocks: en, total: toTranslate, alreadyChinese };
 }
 
-export const contentHash = (blocks) =>
-  createHash('sha1').update(blocks.filter((b) => b.k !== 'img').map((b) => b.en).join('\n')).digest('hex');
+// 内容指纹（用来识别重复文章）：看文字；整页都是图片、没有文字时改看图片地址，否则所有纯图片网页的指纹都一样
+export const contentHash = (blocks) => {
+  const text = blocks.filter((b) => b.k !== 'img').map((b) => b.en).join('\n');
+  const basis = text.trim() ? text : blocks.filter((b) => b.k === 'img').map((b) => b.src).join('\n');
+  return createHash('sha1').update(basis).digest('hex');
+};
 
 export function makeSlug(title) {
   const base = String(title || '').toLowerCase().normalize('NFKD')

@@ -105,8 +105,10 @@ for (const e of fs.readdirSync(ROOT)) {
   fs.cpSync(path.join(ROOT, e), path.join(OUT, e), { recursive: true, filter: (src) => !/\.md$/i.test(src) });
 }
 
-// 浏览器端 PDF 提取要用的段落还原算法，和云函数共用同一份源码
+// 浏览器端 PDF 提取要用的段落还原算法，和云函数共用同一份源码（admin/ 目录下不放这两个文件的副本）
 fs.copyFileSync(path.join(ROOT, 'netlify/functions/lib/pdf-layout.cjs'), path.join(OUT, 'admin/pdf-layout.js'));
+// 浏览器端拆分大 HTML 里内联图片/字体的代码，同样和云函数共用同一份源码
+fs.copyFileSync(path.join(ROOT, 'netlify/functions/lib/assets-scan.cjs'), path.join(OUT, 'admin/extract-assets.js'));
 
 const articleTemplate = fs.readFileSync(path.join(ROOT, 'article.template.html'), 'utf8');
 for (const a of articles.filter((x) => x.kind === 'md')) {

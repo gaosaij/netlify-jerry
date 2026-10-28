@@ -13,6 +13,7 @@ const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 export async function startDevServer({ port = 0, mockLlm = true } = {}) {
   process.env.LOCAL_STORE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'store-'));
   process.env.ADMIN_PASSWORD = 'test-pass';
+  process.env.ALLOW_PRIVATE_URLS = '127.0.0.1'; // 测试用的模拟服务器在本机；生产环境不设置，本机/内网地址一律拒绝
   // 假的 MinerU：任务经过 pending → running → done 三次轮询；记录收到的请求供测试检查
   const mineru = { tasks: new Map(), batches: new Map(), n: 0, puts: [], lastAuth: '' };
   const zipFor = (key) => zipSync({
@@ -20,7 +21,7 @@ export async function startDevServer({ port = 0, mockLlm = true } = {}) {
     [`images/img-${key}.jpg`]: new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]),
     'layout.json': strToU8('{}'),
   });
-  const stats = { imageUAs: [], llmCalls: 0, mismatchOnce: false, rateLimitOnce: false, delayMs: 0 };
+  const stats = { delayOnce: 0, putDelayMs: 0, imageUAs: [], llmCalls: 0, mismatchOnce: false, rateLimitOnce: false, delayMs: 0 };
 
   const api = (await import('../netlify/functions/api.mjs')).default;
   const page = (await import('../netlify/functions/page.mjs')).default;
@@ -85,6 +86,9 @@ export async function startDevServer({ port = 0, mockLlm = true } = {}) {
       const tag = url.searchParams.get('tag') || 'M';
       return text(samplePositionedHtml(names).replace(/Filler paragraph/g, `${tag} paragraph`).replace('Sample Company S-1', `Sample Company S-1 ${tag}`));
     }
+    // 重定向到云元数据地址：必须被拦截
+    if (url.pathname === '/redir/internal') { nodeRes.writeHead(302, { location: 'http://169.254.169.254/latest/meta-data/' }); return nodeRes.end(); }
+    if (url.pathname === '/sample/pg-notimage.jpg') return text('<html>not an image</html>');
     if (url.pathname === '/sample/pg-missing.jpg') return text('nope', 'text/plain', 404);
     if (/^\/sample\/pg\d+a\.jpg$/.test(url.pathname) || url.pathname === '/sample/pg1a.jpg' || url.pathname === '/sample/chart2a.jpg') {
       stats.imageUAs.push(nodeReq.headers['user-agent']);
@@ -107,6 +111,7 @@ export async function startDevServer({ port = 0, mockLlm = true } = {}) {
     if (url.pathname === '/sample/dual') return text(sampleDual);
     if (url.pathname === '/sample/notfound') return text('nope', 'text/plain', 404);
     if (url.pathname === '/sample/sample.pdf') return text(fs.readFileSync(path.join(root, 'tests/sample.pdf')), 'application/pdf');
+    if (url.pathname === '/admin/extract-assets.js') return text(fs.readFileSync(path.join(root, 'netlify/functions/lib/assets-scan.cjs')), 'text/javascript');
     if (url.pathname === '/admin/pdf-layout.js') return text(fs.readFileSync(path.join(root, 'netlify/functions/lib/pdf-layout.cjs')), 'text/javascript');
     if (url.pathname === '/admin/pdf-extract.js') return text(fs.readFileSync(path.join(root, 'admin/pdf-extract.js')), 'text/javascript');
     // 其余静态文件来自 node build.js 生成的 dist/（没构建就只有管理页）
@@ -124,7 +129,7 @@ export async function startDevServer({ port = 0, mockLlm = true } = {}) {
     if (url.pathname.startsWith('/mineru/')) {
       const j = (data, status = 200) => text(JSON.stringify(data), 'application/json', status);
       const m = url.pathname.slice('/mineru'.length);
-      if (m.startsWith('/put/')) { mineru.puts.push({ path: m, bytes: body.length }); return text('', 'text/plain', 200); }
+      if (m.startsWith('/put/')) { if (stats.putDelayMs) await new Promise((r) => setTimeout(r, stats.putDelayMs)); mineru.puts.push({ path: m, bytes: body.length }); return text('', 'text/plain', 200); }
       if (m.startsWith('/zip/')) {
         nodeRes.writeHead(200, { 'content-type': 'application/zip' });
         return nodeRes.end(Buffer.from(zipFor(decodeURIComponent(m.slice(5)))));
@@ -168,6 +173,7 @@ export async function startDevServer({ port = 0, mockLlm = true } = {}) {
     if (mockLlm && url.pathname === '/v1/chat/completions') {
       stats.llmCalls++;
       if (stats.delayMs) await new Promise((r) => setTimeout(r, stats.delayMs));
+      if (stats.delayOnce) { const d = stats.delayOnce; stats.delayOnce = 0; await new Promise((r) => setTimeout(r, d)); }
       if (stats.rateLimitOnce) { stats.rateLimitOnce = false; return text('{"error":"rate"}', 'application/json', 429); }
       const user = JSON.parse(body).messages[1].content;
       const parts = [...user.matchAll(/<<<(\d+)>>>\n([\s\S]*?)(?=\n\n<<<\d+>>>|$)/g)];

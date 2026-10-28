@@ -1,5 +1,6 @@
 // 调用 OpenAI 兼容接口翻译：把若干段英文打成一批，一次请求翻译，用 <<<编号>>> 标记对应关系
 import { needsTranslation } from './parse.mjs';
+import { envMs } from './runtime.mjs';
 
 export function config() {
   return {
@@ -40,6 +41,8 @@ export function makeBatches(blocks, maxChars = 3000, maxItems = 30) {
 }
 
 export class MismatchError extends Error {}
+// 接近函数运行时间上限：不再请求/重试，让调用方保存进度并交棒给新的一次运行
+export class DeadlineError extends Error {}
 
 function parseReply(reply, count) {
   const out = [];
@@ -55,16 +58,21 @@ function parseReply(reply, count) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// 请求一次模型；遇到限流或服务端错误时指数退避重试
-async function chat(messages, cfg, retries = 4) {
+// 请求一次模型；遇到限流或服务端错误时指数退避重试。
+// deadline（毫秒时间戳，可选）：每次请求的超时、重试前的等待都不会越过它，越过就抛 DeadlineError——
+// 这样一轮翻译不会拖到平台的 15 分钟上限被强杀。
+async function chat(messages, cfg, retries = 4, deadline = 0) {
+  const margin = envMs('TRANSLATE_MARGIN_MS', 3000); // 留给保存进度和交棒的时间
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
+    if (deadline && Date.now() + margin > deadline) throw new DeadlineError('接近函数运行时间上限，保存进度后继续');
     try {
+      const timeout = deadline ? Math.max(500, Math.min(120000, deadline - Date.now() - margin / 2)) : 120000;
       const res = await fetch(`${cfg.base}/chat/completions`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${cfg.key}` },
         body: JSON.stringify({ model: cfg.model, temperature: 0.2, messages }),
-        signal: AbortSignal.timeout(120000),
+        signal: AbortSignal.timeout(timeout),
       });
       if (res.status === 429 || res.status >= 500) {
         lastErr = new Error(`模型接口返回 ${res.status}：${(await res.text()).slice(0, 200)}`);
@@ -83,29 +91,31 @@ async function chat(messages, cfg, retries = 4) {
       if (e.fatal) throw e;
       lastErr = e;
     }
-    await sleep(1500 * 2 ** attempt);
+    const wait = 1500 * 2 ** attempt;
+    if (deadline && Date.now() + wait + margin > deadline) throw new DeadlineError('接近函数运行时间上限，保存进度后继续');
+    await sleep(wait);
   }
   throw lastErr;
 }
 
 // 翻译一批文本，返回同样数量的译文
-export async function translateTexts(texts, cfg, title = '') {
+export async function translateTexts(texts, cfg, title = '', deadline = 0) {
   const body = texts.map((t, i) => `<<<${i + 1}>>>\n${t}`).join('\n\n');
   const user = (title ? `文章标题（仅供理解上下文）：${title}\n\n` : '') + body;
-  const reply = await chat([{ role: 'system', content: SYSTEM_PROMPT }, { role: 'user', content: user }], cfg);
+  const reply = await chat([{ role: 'system', content: SYSTEM_PROMPT }, { role: 'user', content: user }], cfg, 4, deadline);
   return parseReply(reply, texts.length);
 }
 
 // 批量翻译对不上号时，对半拆开重试，直到单段为止
-export async function translateWithFallback(texts, cfg, title) {
+export async function translateWithFallback(texts, cfg, title, deadline = 0) {
   try {
-    return await translateTexts(texts, cfg, title);
+    return await translateTexts(texts, cfg, title, deadline);
   } catch (e) {
     if (!(e instanceof MismatchError) || texts.length === 1) throw e;
     const mid = Math.ceil(texts.length / 2);
     const [a, b] = await Promise.all([
-      translateWithFallback(texts.slice(0, mid), cfg, title),
-      translateWithFallback(texts.slice(mid), cfg, title),
+      translateWithFallback(texts.slice(0, mid), cfg, title, deadline),
+      translateWithFallback(texts.slice(mid), cfg, title, deadline),
     ]);
     return [...a, ...b];
   }

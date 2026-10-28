@@ -128,7 +128,16 @@ Netlify 后台 → **Site configuration → Environment variables → Add a vari
 
 想去掉这个本地提取功能：删除 `admin/pdf-extract.js`，再删掉 `admin/index.html` 里 `extractPdf` 相关代码。MinerU 识别不受影响。
 
-## 七、限制与注意
+## 七、可靠性与安全
+
+- **任务互斥**：翻译、OCR、抓取解析都带锁。任务正在运行时，管理页的“继续/开始”会返回“正在进行中”，不会再启动第二个；运行期间每分钟刷新一次锁，上一次运行被平台强杀后锁过期，才允许重新启动。
+- **不会被 15 分钟上限静默杀死**：每次模型请求都带截止时间，快到上限时保存进度并交棒给新的一次运行；连续 3 次运行都没完成任何一批会明确报错（“模型接口响应太慢”），而不是无限重试。
+- **翻译进度保存**：整份文档（可能几 MB）最多每 25 秒保存一次，交棒、出错、完成时一定保存；页面只在进度变化时才重新下载。
+- **防 SSRF**：服务器抓取网页、下载整页图片时，只允许 http/https，拒绝本机、内网、链路本地和云元数据地址（域名解析后的 IP 和每一次重定向都检查）；整页图片还必须是图片、不超过 40MB。被搬运网页里的 `<img>` 地址不可信，所以这一条对 OCR 下载尤其重要。（本地测试用环境变量 `ALLOW_PRIVATE_URLS` 放行测试服务器，生产环境不要设置。）
+- **渲染缓存**：“保留原网页样式”的文章在翻译完成后缓存渲染结果（按更新时间失效），打开不再每次重新解析整份网页；翻译进行中不缓存。文章列表在同一个函数实例里缓存 3 秒，写入立即失效。
+- **纯图片网页**：没有任何文字块时不再当作“已有中文”，会先 OCR；没选翻译或没配 MinerU 时在备注里说明。OCR 识别出的表格在所有版式里都会显示。
+
+## 八、限制与注意
 
 - 直接上传的小文件（粘贴文本、3MB 以下的 HTML）走普通请求；更大的 HTML 和所有 PDF 都是分块上传，不受 Netlify 6MB 请求体限制。HTML 上限 450MB（浏览器端拆出图片后上传），PDF 上限 200MB（MinerU 的限制）。
 - MinerU 每个账号每天有 1000 页的最高优先级额度，超出后识别会排队更慢；具体额度和限制以 MinerU 官网为准。
@@ -139,7 +148,7 @@ Netlify 后台 → **Site configuration → Environment variables → Add a vari
 - 翻译会产生模型调用费用，长文请留意用量。
 - `/admin/` 页面本身公开可访问，但所有写操作和管理接口都要 `ADMIN_PASSWORD`；`/admin/` 已设置 `noindex`，不会被搜索引擎收录。
 
-## 八、本地测试（可选）
+## 九、本地测试（可选）
 
 ```bash
 npm install
@@ -155,10 +164,10 @@ node tests/dev-server.mjs
 
 然后打开 http://127.0.0.1:8790/admin/ ，密码 `test-pass`。
 
-## 九、项目结构
+## 十、项目结构
 
 ```
-admin/                  管理页（admin/pdf-extract.js 是 PDF 提取）
+admin/                  管理页（admin/pdf-extract.js 是浏览器端读取 PDF；pdf-layout.js 和 extract-assets.js 由 build.js 从云函数的共享源码复制生成，不在这个目录里）
 netlify/functions/
   api.mjs               接口：上传、搬运、翻译、删除、列表
   page.mjs              文章页 /t/文章名
@@ -166,6 +175,9 @@ netlify/functions/
   ocr-background.mjs    后台 OCR（MinerU）：PDF 和网页里的整页图片
   ingest-background.mjs 后台导入大网页
   lib/pdf-layout.cjs    行文字 → 段落的还原算法（服务器和浏览器共用）
+  lib/assets-scan.cjs   内联 base64 图片/字体的扫描与拆分（服务器和浏览器共用）
+  lib/safe-fetch.mjs    防 SSRF 的抓取：拒绝本机/内网/云元数据地址，重定向每一跳都检查
+  lib/runtime.mjs       后台任务的锁、锁心跳、时间配置
   lib/                  存储、解析、翻译、渲染
 articles/               手动上传到 GitHub 的静态文章
 articles.json           文章标题、简介、置顶、是否翻译

@@ -6,11 +6,12 @@ import { requireAdmin } from './lib/auth.mjs';
 import { validSlug, parseMarkdown, analyze, contentHash } from './lib/parse.mjs';
 import { config as translateConfig, autoTranslateMaxChars, pendingChars } from './lib/translate.mjs';
 import { fetchHeaders, blockedHint } from './lib/ingest.mjs';
+import { safeFetch } from './lib/safe-fetch.mjs';
 import { kick } from './lib/kick.mjs';
+import { envMs, isLocked, startHeartbeat, touchLock } from './lib/runtime.mjs';
 import { mineruConfig, createUrlTask, getTask, createUploadBatch, putFile, getBatch, fetchResult } from './lib/mineru.mjs';
 
-const budgetMs = () => Number(process.env.OCR_BUDGET_MS) || 12 * 60 * 1000;
-const LOCK_MS = 6 * 60 * 1000;
+const budgetMs = () => envMs('OCR_BUDGET_MS', 12 * 60 * 1000);
 const POLL_MS = Number(process.env.OCR_POLL_MS) || 5000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -28,15 +29,22 @@ async function pool(items, size, fn) {
 // 为这一组申请上传地址并并发上传，然后保存进度。可以随时中断、从断点继续（已上传的图片不会重传）；
 // 单张图片下载失败只会让这一张失败，不影响其它。
 const GROUP = 6;
+const MAX_IMAGE_BYTES = 40 * 1024 * 1024;
 async function submitImages(o, ctx) {
   o.batches = o.batches || [];
   const todo = o.jobs.filter((j) => !j.batch && j.state !== 'failed');
   for (let i = 0; i < todo.length; i += GROUP) {
     const got = await pool(todo.slice(i, i + GROUP), 3, async (j) => {
       try {
-        const res = await fetch(j.src, { headers: fetchHeaders('image/*'), signal: AbortSignal.timeout(90000) });
+        // 图片地址来自被搬运网页的内容（不可信）：safeFetch 拒绝本机/内网地址，并且只接受图片、限制大小
+        const res = await safeFetch(j.src, { headers: fetchHeaders('image/*'), signal: AbortSignal.timeout(90000) });
         if (!res.ok) throw new Error(`下载图片失败（HTTP ${res.status}）${blockedHint(j.src, res.status)}`);
-        return { j, buf: Buffer.from(await res.arrayBuffer()) };
+        const type = res.headers.get('content-type') || '';
+        if (type && !/^image\//i.test(type) && !/octet-stream/i.test(type)) throw new Error(`下载图片失败：这个地址返回的不是图片（${type.split(';')[0]}）`);
+        if (Number(res.headers.get('content-length') || 0) > MAX_IMAGE_BYTES) throw new Error('下载图片失败：图片太大');
+        const buf = Buffer.from(await res.arrayBuffer());
+        if (buf.length > MAX_IMAGE_BYTES) throw new Error('下载图片失败：图片太大');
+        return { j, buf };
       } catch (e) {
         j.state = 'failed'; j.err = e.message;
         return null;
@@ -128,7 +136,7 @@ export default async (req) => {
 
   const meta = await getJSON(`meta/${slug}`);
   if (!meta || !meta.ocr || meta.ocr.finished) return;
-  if (meta.lockAt && Date.now() - meta.lockAt < LOCK_MS) return;
+  if (isLocked(meta)) return; // 已有一个识别任务在跑
   const o = meta.ocr;
 
   const save = async () => {
@@ -138,10 +146,13 @@ export default async (req) => {
     return true;
   };
 
+  // 心跳：下载/上传很慢的时候也定期刷新锁，避免被误判为已中断而被重复启动
+  let stopBeat = () => {};
   try {
     if (!mineruConfig().token) throw new Error('尚未配置 MINERU_API_TOKEN');
     meta.status = 'ocr'; meta.error = ''; meta.lockAt = Date.now();
     if (!(await save())) return;
+    stopBeat = startHeartbeat(() => touchLock(slug, meta));
 
     if (o.mode === 'images') {
       if (!o.jobs.every((j) => j.batch || j.state === 'failed')) {
@@ -239,5 +250,7 @@ export default async (req) => {
   } catch (e) {
     meta.status = 'error'; meta.error = e.message || String(e); meta.lockAt = 0;
     await save();
+  } finally {
+    stopBeat();
   }
 };

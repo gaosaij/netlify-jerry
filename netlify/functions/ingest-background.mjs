@@ -5,8 +5,8 @@ import { getJSON, setJSON, getBinary, setBinary, delPrefix } from './lib/store.m
 import { requireAdmin } from './lib/auth.mjs';
 import { validSlug, decodeBody } from './lib/parse.mjs';
 import { fetchPage, ingestHtml, saveRaw } from './lib/ingest.mjs';
+import { INGEST_LOCK_MS, isLocked, startHeartbeat, touchLock } from './lib/runtime.mjs';
 
-const LOCK_MS = 10 * 60 * 1000;
 
 export default async (req) => {
   if (requireAdmin(req)) return;
@@ -16,7 +16,7 @@ export default async (req) => {
 
   const meta = await getJSON(`meta/${slug}`);
   if (!meta || !meta.ingest) return;
-  if (meta.lockAt && Date.now() - meta.lockAt < LOCK_MS) return;
+  if (isLocked(meta, INGEST_LOCK_MS)) return;
 
   const fail = async (message) => {
     const cur = await getJSON(`meta/${slug}`);
@@ -26,9 +26,11 @@ export default async (req) => {
     if (cur.ingest && cur.ingest.mode === 'upload') await delPrefix(`img/${slug}/`); // 失败时不留孤立的图片（重试会重新生成）
   };
 
+  let stopBeat = () => {};
   try {
     meta.status = 'importing'; meta.error = ''; meta.lockAt = Date.now(); meta.updatedAt = Date.now();
     await setJSON(`meta/${slug}`, meta);
+    stopBeat = startHeartbeat(() => touchLock(slug, meta));
     const { url, translate, title, mode, uploadId, chunks, origPath, assets = [] } = meta.ingest;
     let page;
     if (mode === 'upload') {
@@ -66,6 +68,9 @@ export default async (req) => {
     }
     if (mode === 'upload') await delPrefix(`pdf/${uploadId}/`); // 处理完成，分块不再需要
   } catch (e) {
+    stopBeat();
     await fail(e.message || String(e));
+  } finally {
+    stopBeat();
   }
 };

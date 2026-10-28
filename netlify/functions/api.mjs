@@ -14,6 +14,10 @@ import {
 import { config as translateConfig } from './lib/translate.mjs';
 import { fetchPage, ingestHtml, saveBilingual, saveRaw, syncLimit, MAX_UPLOAD_HTML_BYTES } from './lib/ingest.mjs';
 import { ASSET_TYPES } from './lib/assets.mjs';
+import { INGEST_LOCK_MS, isLocked } from './lib/runtime.mjs';
+
+// decodeURIComponent 遇到不合法的 %xx 会抛 URIError；公开接口不能因此崩溃（要返回 400/404）
+const safeDecode = (t) => { try { return decodeURIComponent(t); } catch { return null; } };
 
 // 公开列表里只给必要字段
 const publicMeta = (m) => ({
@@ -29,7 +33,7 @@ async function createOcrArticle({ origin, title, url, uploadId, chunks, filename
     throw Object.assign(new Error('处理 PDF 需要配置 MINERU_API_TOKEN（也可以取消勾选“用 MinerU 识别”，改用浏览器本地提取文字）'), { status: 503 });
   }
   if (url) {
-    const dup = (await listMeta()).find((m) => m.sourceUrl === url);
+    const dup = (await listMeta({ fresh: true })).find((m) => m.sourceUrl === url);
     if (dup) throw Object.assign(new Error(`这个网址已经搬运过：${dup.title}`), { status: 409, slug: dup.slug });
   }
   const base = (filename || 'document.pdf').replace(/\.pdf$/i, '');
@@ -169,12 +173,12 @@ async function route(req, path) {
     const origPath = /^\/[^\s]{0,500}$/.test(body.origPath || '') ? body.origPath : ''; // 站内文章的原路径（管理页指定）
     const page = await fetchPage(url, { syncLimit: syncLimit() });
     if (page.pdf) {
-      const meta = await createOcrArticle({ origin, title: givenTitle, url: page.finalUrl, translate, filename: decodeURIComponent(new URL(page.finalUrl).pathname.split('/').pop() || 'document.pdf') });
+      const meta = await createOcrArticle({ origin, title: givenTitle, url: page.finalUrl, translate, filename: safeDecode(new URL(page.finalUrl).pathname.split('/').pop() || '') || 'document.pdf' });
       return json(publicMeta(meta), 201);
     }
     if (page.large) {
       // 网页很大（如几百页的备案文件）：同步函数处理不完，先建一个占位，交给后台函数抓取和解析
-      const dup = (await listMeta()).find((m) => m.sourceUrl === page.finalUrl);
+      const dup = (await listMeta({ fresh: true })).find((m) => m.sourceUrl === page.finalUrl);
       if (dup) return json({ error: `这个网址已经搬运过：${dup.title}`, slug: dup.slug }, 409);
       const now = Date.now();
       const meta = {
@@ -203,9 +207,12 @@ async function route(req, path) {
 
     if (req.method === 'POST' && action === 'translate') {
       if (meta.kind !== 'bilingual') return json({ error: '这篇是仅搬运的网页，不能翻译' }, 400);
+      // 任务正在运行（锁还新鲜）时不能再启动一个：两个实例会同时处理同一篇、互相覆盖进度，还会重复花费用。
+      // 锁过期（上一次运行被强杀）后后台函数会自己接手，这里不需要、也不应该强制清锁。
       if (meta.ingest) {
+        if (isLocked(meta, INGEST_LOCK_MS)) return json({ error: '正在抓取解析中，请稍后再试' }, 409);
         // 还在抓取解析阶段出错：重新抓取
-        meta.status = 'importing'; meta.error = ''; meta.lockAt = 0; meta.updatedAt = Date.now();
+        meta.status = 'importing'; meta.error = ''; meta.updatedAt = Date.now();
         await setJSON(`meta/${slug}`, meta);
         await kick(origin, 'ingest-background', slug);
         return json(publicMeta(meta));
@@ -213,20 +220,22 @@ async function route(req, path) {
       if (meta.ocr && !meta.ocr.finished) {
         // 还在 OCR 阶段（识别中断或出错）：继续识别，识别完会自动翻译
         if (!mineruConfig().token) return json({ error: '尚未配置 MINERU_API_TOKEN' }, 503);
-        meta.status = 'ocr'; meta.error = ''; meta.lockAt = 0; meta.updatedAt = Date.now();
+        if (isLocked(meta)) return json({ error: '正在识别中，请稍后再试' }, 409);
+        meta.status = 'ocr'; meta.error = ''; meta.updatedAt = Date.now();
         await setJSON(`meta/${slug}`, meta);
         await kick(origin, 'ocr-background', slug);
         return json(publicMeta(meta));
       }
       if (!translateConfig().key) return json({ error: '尚未配置 OPENAI_API_KEY' }, 503);
-      meta.status = 'queued'; meta.error = ''; meta.lockAt = 0; meta.updatedAt = Date.now();
+      if (isLocked(meta)) return json({ error: '正在翻译中，请稍后再试' }, 409);
+      meta.status = 'queued'; meta.error = ''; meta.updatedAt = Date.now();
       await setJSON(`meta/${slug}`, meta);
       await kick(origin, 'translate-background', slug);
       return json(publicMeta(meta));
     }
     if (req.method === 'DELETE' && !action) {
       await Promise.all([
-        del(`meta/${slug}`), del(`doc/${slug}`), del(`html/${slug}`), delPrefix(`img/${slug}/`), delPrefix(`tbl/${slug}/`),
+        del(`meta/${slug}`), del(`doc/${slug}`), del(`html/${slug}`), del(`render/${slug}`), delPrefix(`img/${slug}/`), delPrefix(`tbl/${slug}/`),
         meta.ocr && meta.ocr.uploadId ? delPrefix(`pdf/${meta.ocr.uploadId}/`) : null,
         meta.ingest && meta.ingest.uploadId ? delPrefix(`pdf/${meta.ingest.uploadId}/`) : null,
       ]);
@@ -237,7 +246,8 @@ async function route(req, path) {
 }
 
 export default async (req) => {
-  const path = new URL(req.url).pathname.replace(/^\/api\/?/, '').split('/').filter(Boolean).map(decodeURIComponent);
+  const path = new URL(req.url).pathname.replace(/^\/api\/?/, '').split('/').filter(Boolean).map(safeDecode);
+  if (path.includes(null)) return json({ error: '路径编码不正确' }, 400);
   try {
     return await route(req, path);
   } catch (e) {

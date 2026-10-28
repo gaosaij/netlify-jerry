@@ -1,20 +1,22 @@
 // 自动化测试：node tests/run.mjs
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import path from 'node:path';
 import { startDevServer } from './dev-server.mjs';
 import { createRequire } from 'node:module';
 import { showZh } from '../netlify/functions/lib/parse.mjs';
-import { parseMarkdown, parseHtml, analyze } from '../netlify/functions/lib/parse.mjs';
+import { parseMarkdown, parseHtml, parseText, analyze } from '../netlify/functions/lib/parse.mjs';
 import { renderStyledPage } from '../netlify/functions/lib/render.mjs';
 import { makePdf, samplePages } from './make-pdf.mjs';
 import { samplePositionedHtml } from './make-positioned.mjs';
 import { looksPositioned, parsePositioned } from '../netlify/functions/lib/positioned.mjs';
 import { blockedHint } from '../netlify/functions/lib/ingest.mjs';
+import { assertPublicUrl, isPrivateIp } from '../netlify/functions/lib/safe-fetch.mjs';
 import { externalizeDataUris, singleFileUrl, hasBigDataUri } from '../netlify/functions/lib/assets.mjs';
-import { getJSON, getText, getBinary } from '../netlify/functions/lib/store.mjs';
+import { getJSON, setJSON, getText, setText, getBinary, listMeta } from '../netlify/functions/lib/store.mjs';
 import { randomBytes } from 'node:crypto';
 const { buildBlocks } = createRequire(import.meta.url)('../netlify/functions/lib/pdf-layout.cjs');
-const { extractDataUris, b64ToBytes } = createRequire(import.meta.url)('../admin/extract-assets.js');
+const { extractDataUris, b64ToBytes, scanDataUris, hasDataUri } = createRequire(import.meta.url)('../netlify/functions/lib/assets-scan.cjs');
 
 let passed = 0;
 const ok = (name) => { passed++; console.log('  ✓', name); };
@@ -118,6 +120,22 @@ for (const f of ['It_Helps_to_Ask_-_The_Cumulative_Benefits_of_Asking_Follow-Up_
   assert.ok(blocks[4].en.includes('before the page ends, so it must be joined'));
   ok('PDF 段落还原：去页眉页码、接连字符、合并跨页段落、识别标题');
   assert.ok(makePdf(samplePages()).length > 500);
+}
+
+// SSRF 防护：地址分类（不依赖网络）
+{
+  assert.equal(process.env.ALLOW_PRIVATE_URLS, undefined);
+  for (const bad of ['http://127.0.0.1:9/', 'http://localhost/x', 'http://foo.localhost/', 'http://[::1]/', 'http://10.1.2.3/', 'http://169.254.169.254/latest/meta-data/',
+    'http://192.168.0.10/', 'http://172.16.5.5/', 'http://172.31.255.255/', 'http://100.64.0.1/', 'http://0.0.0.0/', 'http://[::ffff:7f00:1]/', 'http://[::ffff:10.0.0.1]/',
+    'http://[fd00::1]/', 'http://[fe80::1]/', 'http://printer.local/', 'http://db.internal/', 'file:///etc/passwd', 'ftp://example.com/x', 'gopher://x/']) {
+    await assert.rejects(() => assertPublicUrl(bad), (e) => e.status === 400, bad + ' 应被拒绝');
+  }
+  for (const good of ['http://8.8.8.8/', 'https://1.1.1.1/x.jpg', 'https://[2001:4860:4860::8888]/', 'http://172.32.0.1/', 'http://100.128.0.1/']) {
+    assert.ok(await assertPublicUrl(good), good + ' 应被允许');
+  }
+  assert.equal(isPrivateIp('169.254.169.254'), true);
+  assert.equal(isPrivateIp('93.184.216.34'), false);
+  ok('SSRF：本机/内网/链路本地/云元数据/IPv4 映射/非 http 协议都被拒绝，公网地址放行');
 }
 
 // ---- 端到端 ----
@@ -295,6 +313,9 @@ assert.ok(pageHtml.includes('position:relative;width:468pt;height:54.75pt'), '�
 assert.ok(pageHtml.includes('class="zt"') && pageHtml.includes('[ZH] Revenue') && pageHtml.includes('[ZH] Net loss'), '中文对照表');
 assert.ok(pageHtml.includes('<td class="num">100%</td>') && pageHtml.includes('<td class="num">(3,734)</td>'), '数字原样');
 assert.ok(pageHtml.includes('font-style:italic;') && pageHtml.includes('Note: Totals of the table'));
+// OCR 识别出的表格（没有原始版式）在文档版式里也要显示，且去掉了危险属性
+assert.ok(pageHtml.includes('<div class="raw table-wrap"><table><tbody><tr><td>cell value</td></tr></tbody></table></div>') || /<div class="raw table-wrap">[\s\S]*?cell value[\s\S]*?<\/div>/.test(pageHtml), 'OCR 表格在文档版式里显示');
+assert.ok(!/<td[^>]*onclick/.test(pageHtml));
 ok('PDF 转 HTML：文档版式（页面卡片、字体样式）+ 原表格 + 中文对照表 + 整页图片 OCR 放回图片后面');
 
 // 大网页：同步函数处理不了，改走后台导入
@@ -406,6 +427,235 @@ ok('大网页：先建占位，后台抓取解析，再 OCR 和翻译');
     assert.notEqual(norm('/articles/a.html'), norm('/articles/b.html'));
   }
   ok('站内文章原路径：指定的路径如实记录；管理页和首页的路径比较能对上被 Netlify 改写的地址');
+}
+
+// ---- 翻译：截止时间内交棒、停滞保护、限频保存文档 ----
+{
+  const longDoc = (tag, n) => `# ${tag}\n\n` + Array.from({ length: n }, (_, i) => `${tag} paragraph ${i} has enough plain English words to take up some space in a batch.`).join('\n\n');
+  const zhCount = (html) => (html.match(/class="zh"/g) || []).length;
+
+  // 1) 一次请求超过截止时间：不算失败，保存进度并交棒，新的一次运行接着完成
+  process.env.TRANSLATE_DEADLINE_MS = '1200'; process.env.TRANSLATE_MARGIN_MS = '100';
+  stats.delayOnce = 4000; // 第一次模型请求特别慢（超过截止时间被中断）
+  const calls0 = stats.llmCalls;
+  meta = await (await post('/api/upload', { filename: 'deadline.md', content: longDoc('Deadline', 6), translate: true })).json();
+  meta = await waitDone(meta.slug, 30000);
+  process.env.TRANSLATE_DEADLINE_MS = ''; process.env.TRANSLATE_MARGIN_MS = '';
+  assert.equal(meta.status, 'done', JSON.stringify(meta));
+  assert.ok(stats.llmCalls - calls0 >= 2, '被中断的请求之后又重新请求了');
+  assert.equal(zhCount(await (await fetch(`${origin}/t/${meta.slug}`)).text()), 7, '标题+6 段都翻译了');
+
+  // 2) 连续几次运行都在时间上限内完不成任何一批：明确报错，而不是无限交棒
+  process.env.TRANSLATE_DEADLINE_MS = '600'; process.env.TRANSLATE_MARGIN_MS = '100';
+  stats.delayMs = 3000;
+  meta = await (await post('/api/upload', { filename: 'stall.md', content: longDoc('Stall', 3), translate: true })).json();
+  meta = await waitDone(meta.slug, 30000);
+  stats.delayMs = 0; process.env.TRANSLATE_DEADLINE_MS = ''; process.env.TRANSLATE_MARGIN_MS = '';
+  assert.equal(meta.status, 'error');
+  assert.ok(meta.error.includes('响应太慢'), meta.error);
+
+  // 3) 限频保存：很长的文章，每轮都交棒（预算 1ms），文档只在强制点落盘；结果完整，没有重复翻译
+  process.env.TRANSLATE_SAVE_MS = '100000000'; process.env.TRANSLATE_BUDGET_MS = '1';
+  const callsB = stats.llmCalls;
+  meta = await (await post('/api/upload', { filename: 'throttle.md', content: longDoc('Throttle', 119), translate: true })).json();
+  meta = await waitDone(meta.slug, 60000);
+  process.env.TRANSLATE_SAVE_MS = ''; process.env.TRANSLATE_BUDGET_MS = '';
+  assert.equal(meta.status, 'done', JSON.stringify(meta));
+  assert.equal(meta.done, meta.total);
+  assert.equal(zhCount(await (await fetch(`${origin}/t/${meta.slug}`)).text()), 120, '120 段全部翻译，交棒不丢进度');
+  assert.equal(stats.llmCalls - callsB, 4, '120 段 = 4 批，每批只请求一次（交棒前强制保存，没有重复翻译）');
+
+  // 4) 不限频时每一轮都更新 updatedAt（页面轮询靠它判断要不要刷新）；限频时只在强制点更新
+  const distinctUpdates = async (saveMs) => {
+    process.env.TRANSLATE_SAVE_MS = saveMs;
+    stats.delayMs = 80;
+    const m = await (await post('/api/upload', { filename: 'cadence-' + saveMs + '.md', content: longDoc('Cadence' + saveMs, 400), translate: true })).json();
+    const seen = new Set();
+    for (;;) {
+      const cur = await getJSON(`meta/${m.slug}`);
+      seen.add(cur.updatedAt);
+      if (['done', 'error'].includes(cur.status)) break;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    stats.delayMs = 0; process.env.TRANSLATE_SAVE_MS = '';
+    return seen.size;
+  };
+  const frequent = await distinctUpdates('1');
+  const throttled = await distinctUpdates('100000000');
+  assert.ok(frequent >= 5, '不限频：每轮都更新（' + frequent + '）');
+  assert.ok(throttled <= 3, '限频：只在开始和结束时更新（' + throttled + '）');
+  ok('翻译：超截止时间不算失败而是交棒；连续停滞明确报错；文档限频保存且交棒不丢进度、不重复翻译');
+}
+
+// ---- 畸形的百分号编码：返回 4xx，不能让函数崩溃 ----
+{
+  for (const p of ['/api/%', '/api/articles/%E0%A4%A', '/api/img/abc/%zz.png']) {
+    const r = await fetch(origin + p);
+    assert.equal(r.status, 400, p);
+    assert.ok((await r.json()).error.includes('路径编码'));
+  }
+  for (const p of ['/t/%', '/t/%E0%A4%A']) {
+    const r = await fetch(origin + p);
+    assert.equal(r.status, 404, p);
+    assert.ok((await r.text()).includes('文章不存在'));
+  }
+  assert.equal((await fetch(origin + '/api/articles/%61bc')).status, 404, '合法的编码照常解码（%61 = a）');
+  ok('畸形的百分号编码返回 400/404，不再崩溃');
+}
+
+// ---- SSRF 端到端：重定向到元数据地址、网页里指向内网的图片、不是图片的响应 ----
+{
+  // 管理员输入的网址重定向到云元数据地址：被拦截
+  res = await post('/api/import', { url: origin + '/redir/internal', translate: true });
+  assert.equal(res.status, 400);
+  assert.ok((await res.json()).error.includes('不允许访问内网或本机地址'));
+  // 被搬运网页里的整页图片指向内网、或返回的不是图片：这两张失败，正常的那张照常识别
+  const b0 = mineru.batches.size;
+  const html = `<html><head><title>Evil Images</title></head><body><p>A normal English paragraph so the page has text to translate.</p>
+    <img src="http://169.254.169.254/latest/meta-data/a.jpg" style="width:612pt;height:792pt">
+    <img src="${origin}/sample/pg-notimage.jpg" style="width:612pt;height:792pt">
+    <img src="${origin}/sample/pg1a.jpg" style="width:612pt;height:792pt"></body></html>`;
+  meta = await (await post('/api/upload', { filename: 'evil.html', content: html, translate: true })).json();
+  meta = await waitDone(meta.slug);
+  assert.equal(meta.status, 'done', JSON.stringify(meta));
+  const sent = [...mineru.batches.values()].slice(b0).flatMap((b) => b.files.map((f) => f.name));
+  assert.deepEqual(sent, ['img-2.jpg'], '只有正常的图片被上传给 MinerU');
+  assert.ok(meta.note.includes('2 张整页图片没能识别'), meta.note);
+  const j = (await getJSON(`meta/${meta.slug}`)).ocr.jobs;
+  assert.ok(j[0].err.includes('不允许访问内网或本机地址') && j[1].err.includes('不是图片'), JSON.stringify(j.map((x) => x.err)));
+  ok('SSRF 端到端：重定向到元数据地址被拦；网页里指向内网/非图片的整页图片下载失败而不外传');
+}
+
+// ---- 渲染缓存与轻量轮询：“保留原样式”的文章不再每次请求都重新解析整份网页 ----
+{
+  const NT = '__CSP_NONCE_PLACEHOLDER__';
+  const styled = (await get('/api/articles')).find((m) => m.layout === 'page' && m.status === 'done');
+  const slug = styled.slug;
+  const nonceOf = (r) => r.headers.get('content-security-policy').match(/nonce-([^']+)'/)[1];
+  await (await fetch(`${origin}/t/${slug}`)).text(); // 渲染并写入缓存
+  const m1 = await getJSON(`meta/${slug}`);
+  const cached = await getText(`render/${slug}`);
+  assert.ok(cached && cached.startsWith(`v=${m1.updatedAt}\n`) && cached.includes(NT), '渲染结果已缓存，nonce 用占位符');
+  // 用哨兵证明缓存真的被使用；每次请求的 nonce 不同，并且被替换进了页面
+  await setText(`render/${slug}`, `v=${m1.updatedAt}\n<html><body>CACHED_SENTINEL<script nonce="${NT}"></script></body></html>`);
+  const r1 = await fetch(`${origin}/t/${slug}`); const t1 = await r1.text();
+  const r2 = await fetch(`${origin}/t/${slug}`); await r2.text();
+  assert.ok(t1.includes('CACHED_SENTINEL') && t1.includes(`nonce="${nonceOf(r1)}"`) && !t1.includes(NT));
+  assert.notEqual(nonceOf(r1), nonceOf(r2), '缓存不能让不同请求共用同一个 nonce');
+  // updatedAt 变化后缓存失效：重新渲染并更新缓存
+  m1.updatedAt += 1; await setJSON(`meta/${slug}`, m1);
+  const t3 = await (await fetch(`${origin}/t/${slug}`)).text();
+  assert.ok(!t3.includes('CACHED_SENTINEL') && t3.includes('class="zh-tr"'));
+  assert.ok((await getText(`render/${slug}`)).startsWith(`v=${m1.updatedAt}\n`));
+  // 翻译进行中的文章不缓存；轮询脚本先查状态接口，只有进度变了才下载整页
+  stats.delayMs = 300;
+  const hot = await (await post('/api/upload', { filename: 'hot.html', content: '<html><head><title>Hot Styled</title><style>p{color:blue}</style></head><body>' + Array.from({ length: 300 }, (_, i) => `<p>Hot styled paragraph ${i} for the cache test in the page layout.</p>`).join('') + '</body></html>', translate: true })).json();
+  await new Promise((r) => setTimeout(r, 350));
+  const hotHtml = await (await fetch(`${origin}/t/${hot.slug}`)).text();
+  assert.ok(hotHtml.includes('data-active="1"'));
+  assert.ok(hotHtml.includes("fetch('/api/articles/' + encodeURIComponent(slug)") && hotHtml.includes('String(m.updatedAt) === p.dataset.updated'), '轮询先查状态接口');
+  assert.equal(await getText(`render/${hot.slug}`), null, '翻译进行中不缓存');
+  stats.delayMs = 0;
+  await waitDone(hot.slug);
+  // 紧凑排版/文档版式的轮询脚本同样先查状态接口
+  assert.ok((await (await fetch(`${origin}/t/${hot.slug}`)).text()).includes('p{color:blue}'));
+  await fetch(`${origin}/t/${hot.slug}`);
+  assert.ok((await getText(`render/${hot.slug}`)).startsWith('v='), '完成后才缓存');
+  assert.equal((await fetch(`${origin}/api/articles/${hot.slug}`, { method: 'DELETE', headers: H })).status, 200);
+  assert.equal(await getText(`render/${hot.slug}`), null, '删除文章时一并清掉缓存');
+  ok('渲染缓存：完成后缓存、nonce 每次不同、updatedAt 变化即失效、翻译中不缓存、删除时清理；轮询先查状态接口');
+}
+
+// ---- 文章列表缓存：3 秒内复用；写入/删除立即失效；查重用最新数据 ----
+{
+  const warm = async () => { await listMeta(); return listMeta(); };
+  const first = (await warm())[0];
+  const file = path.join(process.env.LOCAL_STORE_DIR, encodeURIComponent(`meta/${first.slug}`));
+  const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+  fs.writeFileSync(file, JSON.stringify({ ...raw, title: 'CHANGED_BEHIND_THE_BACK' })); // 绕过 store 直接改文件
+  assert.equal((await listMeta()).find((m) => m.slug === first.slug).title, first.title, '缓存期内复用，不重新读取存储');
+  assert.equal((await listMeta({ fresh: true })).find((m) => m.slug === first.slug).title, 'CHANGED_BEHIND_THE_BACK', 'fresh 强制读最新');
+  await setJSON(`meta/${first.slug}`, raw); // 通过 store 写入：缓存立即失效
+  assert.equal((await listMeta()).find((m) => m.slug === first.slug).title, first.title);
+  ok('文章列表缓存：缓存期内复用，写入立即失效，fresh 强制读最新');
+}
+
+// ---- 互斥：任务运行中不能再启动一个；锁过期才能重试；慢步骤期间锁持续刷新；删除后不会被心跳复活 ----
+{
+  const slugs = (await get('/api/articles')).filter((m) => m.status === 'done' && m.kind === 'bilingual');
+  const target = slugs[0].slug;
+  const withMeta = async (patch) => { const m = await getJSON(`meta/${target}`); Object.assign(m, patch); await setJSON(`meta/${target}`, m); return m; };
+  const orig = await getJSON(`meta/${target}`);
+
+  // 翻译：锁还新鲜 → 409，且不会把锁清掉
+  const fresh = Date.now() - 1000;
+  await withMeta({ status: 'translating', lockAt: fresh });
+  res = await post(`/api/articles/${target}/translate`, {});
+  assert.equal(res.status, 409);
+  assert.equal((await getJSON(`meta/${target}`)).lockAt, fresh, '被拒绝时不能清掉别人的锁');
+  // 锁已过期（上一次运行被强杀）→ 允许重试
+  await withMeta({ status: 'translating', lockAt: Date.now() - 7 * 60 * 1000 });
+  res = await post(`/api/articles/${target}/translate`, {});
+  assert.equal(res.status, 200);
+  assert.equal((await waitDone(target)).status, 'done');
+  // OCR 阶段、抓取阶段同理
+  await withMeta({ status: 'ocr', lockAt: Date.now() - 1000, ocr: { mode: 'images', jobs: [], finished: false } });
+  assert.equal((await post(`/api/articles/${target}/translate`, {})).status, 409);
+  await withMeta({ ocr: undefined, ingest: { url: 'http://x/', translate: true }, status: 'importing', lockAt: Date.now() - 1000 });
+  assert.equal((await post(`/api/articles/${target}/translate`, {})).status, 409);
+  await setJSON(`meta/${target}`, orig); // 还原
+
+  // 心跳：下载/上传很慢时，锁在运行期间持续刷新（否则超过 6 分钟的慢组会被误判为中断）
+  process.env.LOCK_HEARTBEAT_MS = '40'; stats.putDelayMs = 350;
+  const hb = await (await post('/api/import', { url: `${origin}/sample/multi.htm?tag=HB&imgs=pg1a.jpg,pg2a.jpg,pg3a.jpg,pg4a.jpg,pg5a.jpg,pg6a.jpg`, translate: true })).json();
+  const locks = new Set();
+  for (;;) {
+    const cur = await getJSON(`meta/${hb.slug}`);
+    if (cur && cur.lockAt) locks.add(cur.lockAt);
+    if (cur && ['done', 'error'].includes(cur.status)) break;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  assert.ok(locks.size >= 6, '慢上传期间锁被持续刷新：' + locks.size + ' 个不同的值');
+  assert.equal((await getJSON(`meta/${hb.slug}`)).status, 'done');
+
+  // 运行途中删除文章：心跳和保存都不能把它写回来
+  const doomed = await (await post('/api/import', { url: `${origin}/sample/multi.htm?tag=DEL&imgs=pg1a.jpg,pg2a.jpg,pg3a.jpg`, translate: true })).json();
+  await new Promise((r) => setTimeout(r, 300)); // 等后台开始上传
+  assert.equal((await fetch(`${origin}/api/articles/${doomed.slug}`, { method: 'DELETE', headers: H })).status, 200);
+  await new Promise((r) => setTimeout(r, 1800)); // 之后后台还会跑一阵，期间心跳（40ms）持续触发
+  stats.putDelayMs = 0; process.env.LOCK_HEARTBEAT_MS = '';
+  assert.equal(await getJSON(`meta/${doomed.slug}`), null, '删除后不能被心跳或保存复活');
+  ok('互斥：运行中重试返回 409 且不清锁、锁过期可重试；慢步骤期间锁持续刷新；删除后不会被复活');
+}
+
+// ---- 纯图片网页：不能被当成“已有中文”而跳过 OCR ----
+{
+  assert.equal(analyze(parseText('12345\n\n678').blocks).alreadyChinese, false);
+  assert.equal(analyze([]).alreadyChinese, false);
+  const imgOnly = (src) => `<html><head><title>Image Only ${src.length}</title></head><body><img src="${origin}/sample/${src}" style="width:612pt;height:792pt"></body></html>`;
+  const b0 = mineru.batches.size;
+  meta = await (await post('/api/upload', { filename: 'img-only.html', content: imgOnly('pg1a.jpg'), translate: true })).json();
+  assert.equal(meta.status, 'ocr', '纯图片网页应该先 OCR');
+  meta = await waitDone(meta.slug);
+  assert.equal(meta.status, 'done', JSON.stringify(meta));
+  assert.equal(mineru.batches.size, b0 + 1);
+  assert.ok((await (await fetch(`${origin}/t/${meta.slug}`)).text()).includes('[ZH] Paragraph text from'), 'OCR 文字已翻译');
+  // 没选翻译：不 OCR，给出说明，状态是 idle 而不是 skip
+  meta = await (await post('/api/upload', { filename: 'img-only2.html', content: imgOnly('pg2a.jpg'), translate: false })).json();
+  assert.equal(meta.status, 'idle');
+  assert.ok(meta.note.includes('没有选择翻译'), meta.note);
+  assert.equal(mineru.batches.size, b0 + 1);
+  // 没配 MinerU：提示需要配置
+  process.env.MINERU_API_TOKEN = '';
+  meta = await (await post('/api/upload', { filename: 'img-only3.html', content: imgOnly('pg3a.jpg'), translate: true })).json();
+  process.env.MINERU_API_TOKEN = tokenBackup;
+  assert.equal(meta.status, 'idle');
+  assert.ok(meta.note.includes('MINERU_API_TOKEN'), meta.note);
+  // 既没有文字也没有图片
+  meta = await (await post('/api/upload', { filename: 'digits.txt', content: '12345\n\n67890', translate: true })).json();
+  assert.equal(meta.status, 'done');
+  assert.equal(meta.note, '没有需要翻译的英文内容');
+  ok('纯图片网页先 OCR 再翻译；没选翻译/没配 MinerU 时给出说明；无文字内容不再显示“已有中文”');
 }
 
 // ---- 整页图片 OCR：个别失败、全部失败、超时交棒 ----
@@ -528,6 +778,25 @@ ok('大网页：先建占位，后台抓取解析，再 OCR 和翻译');
   assert.equal(server.html, client.html.replace(/__ASSET__\//g, 'https://o.example/api/img/slug-x/'));
   assert.ok((await getBinary('img/slug-x/d0.png')).length === 9 * 1024 * 1024);
   ok('超长 base64（12MB）不再栈溢出，服务器端与浏览器端的拆分结果一致');
+}
+
+// 预检 hasBigDataUri：命中即返回，不复制整份网页；语义正确
+{
+  const b = (n) => 'A'.repeat(n);
+  assert.equal(hasBigDataUri(`<img src="data:image/png;base64,${b(2000)}">`), true);
+  assert.equal(hasBigDataUri(`<img src="data:image/png;base64,${b(1000)}">`), false, '小于约 1KB 的不算');
+  assert.equal(hasBigDataUri(`<a href="data:text/html;base64,${b(5000)}">`), false, '非图片/字体类型不算');
+  assert.equal(hasBigDataUri('<p>nothing here</p>'), false);
+  assert.equal(hasDataUri, hasBigDataUri, '服务器和浏览器共用同一份实现');
+  // 100MB 的网页，大图就在开头：必须几乎立刻返回（不能先把整页扫一遍再拼接）
+  const big = `<img src="data:image/png;base64,${b(2000)}">` + 'x'.repeat(100 * 1024 * 1024);
+  const t0 = Date.now();
+  assert.equal(hasBigDataUri(big), true);
+  assert.ok(Date.now() - t0 < 200, '命中即返回：' + (Date.now() - t0) + 'ms');
+  // 没有任何替换时原样返回同一个字符串（不复制）
+  let visited = 0;
+  assert.equal(scanDataUris(`<img src="data:image/png;base64,${b(2000)}">`, () => { visited++; return null; }).length > 0 && visited, 1);
+  ok('hasBigDataUri 命中即返回、语义正确；服务器与浏览器共用同一份扫描代码');
 }
 
 // ---- 超大 HTML（几百 MB）：浏览器端拆出图片/字体，逐个（分块）上传，再上传精简后的网页 ----
@@ -654,6 +923,7 @@ ok('抓取失败给出明确错误');
 // 上传 Markdown：长文分多轮翻译、进度可见
 const longMd = '# Long Doc\n\n' + Array.from({ length: 40 }, (_, i) => `Paragraph number ${i} has some English words in it for testing purposes. `.repeat(8)).join('\n\n');
 stats.delayMs = 60;
+process.env.TRANSLATE_SAVE_MS = '1'; // 每轮都保存文档，才能看到中间进度
 res = await post('/api/upload', { filename: 'long.md', content: longMd, translate: true });
 meta = await res.json();
 assert.equal(res.status, 201);
@@ -665,6 +935,7 @@ for (;;) {
   await new Promise((r) => setTimeout(r, 50));
 }
 stats.delayMs = 0;
+process.env.TRANSLATE_SAVE_MS = '';
 assert.ok(sawPartial, '应能看到中间进度');
 assert.equal(meta.done, meta.total);
 ok('长文分多轮翻译，翻译中途进度可见（' + meta.total + ' 段）');

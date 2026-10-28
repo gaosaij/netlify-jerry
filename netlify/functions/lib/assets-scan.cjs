@@ -1,11 +1,10 @@
-// 在浏览器里把网页里内联的 base64 图片、字体拆出来（SingleFile 保存的网页常有几十到上百 MB）。
-// 拆出来的资源逐个单独上传，网页里原来的位置换成占位地址 __ASSET__/<名字>，服务器收到后再换成本站地址。
-// 这样上传的 HTML 只剩文字和样式，几 MB 就够，文件大小不再受服务器内存限制。
+// 内联资源（data: 地址里的 base64 图片、字体）的扫描与拆分。
+// 浏览器（管理页上传大 HTML 前先拆）和服务器（兜底路径）共用这一份，由 build.js 复制到 dist/admin/extract-assets.js。
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory();
   else root.ExtractAssets = factory();
 })(this, function () {
-  // 只拆图片和字体（和服务器端 lib/assets.mjs 保持一致）
+  // 只拆图片和字体；脚本、HTML 之类的 data: 不动
   const EXT = {
     'image/jpeg': 'jpg', 'image/jpg': 'jpg', 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp',
     'image/avif': 'avif', 'image/svg+xml': 'svg', 'image/bmp': 'bmp', 'image/x-icon': 'ico', 'image/vnd.microsoft.icon': 'ico',
@@ -13,36 +12,50 @@
     'application/font-woff': 'woff', 'application/font-woff2': 'woff2', 'application/x-font-ttf': 'ttf',
     'application/x-font-woff': 'woff', 'application/x-font-opentype': 'otf', 'application/vnd.ms-fontobject': 'eot',
   };
+  const MIN_BASE64 = 1500; // 小于约 1KB 的内联资源（图标、占位图）不拆
   const MAX_ASSETS = 1500;
 
-  // 线性扫描内联资源。不能用 /[A-Za-z0-9+/=]{1500,}/ 这样的正则去匹配 base64：遇到几 MB 的长串，V8 的正则引擎会栈溢出。
-  // visit(mime, b64) 返回要换上的文字；返回 null 表示保持原样。
+  const isB64 = (c) => (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c === 43 || c === 47 || c === 61;
+
+  // 线性扫描。不能用 /[A-Za-z0-9+/=]{1500,}/ 这样的正则匹配 base64：遇到几 MB 的长串，V8 的正则引擎会栈溢出。
+  // visit(mime, b64) 返回要换上的文字；返回 null 表示保持原样。一处都没换时原样返回 html（不复制几十 MB 的字符串）。
   function scanDataUris(html, visit) {
     const head = /data:([\w.+-]+\/[\w.+-]+);base64,/g;
-    const parts = [];
+    let parts = null;
     let last = 0;
     let m;
     while ((m = head.exec(html))) {
       const start = head.lastIndex;
       let i = start;
-      while (i < html.length) {
-        const c = html.charCodeAt(i);
-        if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c === 43 || c === 47 || c === 61) i++;
-        else break;
-      }
+      while (i < html.length && isB64(html.charCodeAt(i))) i++;
       head.lastIndex = i;
-      if (i - start < 1500) continue; // 小于约 1KB 的不拆
+      if (i - start < MIN_BASE64) continue;
       const rep = visit(m[1], html.slice(start, i));
       if (rep == null) continue;
-      parts.push(html.slice(last, m.index), rep);
+      (parts || (parts = [])).push(html.slice(last, m.index), rep);
       last = i;
     }
+    if (!parts) return html;
     parts.push(html.slice(last));
     return parts.join('');
   }
 
-  // 返回 { html, assets: [{ name, ext, b64 }] }；同一份内容出现多次只算一个资源
-  function extractDataUris(html) {
+  // 有没有值得拆的内联图片/字体：命中第一个就返回，并且最多只看每个候选的前 MIN_BASE64 个字符
+  function hasDataUri(html) {
+    const head = /data:([\w.+-]+\/[\w.+-]+);base64,/g;
+    let m;
+    while ((m = head.exec(html))) {
+      if (!EXT[m[1].toLowerCase()]) continue;
+      let i = head.lastIndex;
+      const need = i + MIN_BASE64;
+      while (i < html.length && i < need && isB64(html.charCodeAt(i))) i++;
+      if (i >= need) return true;
+    }
+    return false;
+  }
+
+  // 返回 { html, assets: [{ name, ext, b64 }] }：资源换成 `${prefix}${名字}`；同一份内容出现多次只算一个资源
+  function extractDataUris(html, prefix = '__ASSET__/') {
     const names = new Map(); // base64 内容 → 名字
     const assets = [];
     const out = scanDataUris(html, (mime, b64) => {
@@ -55,12 +68,12 @@
         names.set(b64, name);
         assets.push({ name, ext, b64 });
       }
-      return `__ASSET__/${name}`;
+      return prefix + name;
     });
     return { html: out, assets };
   }
 
-  // base64 → 字节（浏览器用 atob，Node 测试用 Buffer）
+  // base64 → 字节（浏览器用 atob，Node 用 Buffer）
   function b64ToBytes(b64) {
     if (typeof Buffer !== 'undefined') return new Uint8Array(Buffer.from(b64, 'base64'));
     const bin = atob(b64);
@@ -69,5 +82,5 @@
     return bytes;
   }
 
-  return { extractDataUris, b64ToBytes, scanDataUris };
+  return { EXT, scanDataUris, hasDataUri, extractDataUris, b64ToBytes };
 });

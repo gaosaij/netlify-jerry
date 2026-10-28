@@ -116,14 +116,23 @@ const CSS = `
 `;
 
 // 翻译进行中时，每 8 秒拉取一次最新页面，只替换进度条和正文，不打断阅读位置
+// 翻译进行中时的自动刷新：每 8 秒先查一个很小的状态接口，只有进度（updatedAt）真的变了才下载整页并替换进度条和正文，
+// 不打断阅读位置，也不会每 8 秒都让服务器重新渲染整份文章
 const POLL = `
 (function () {
   var timer = setInterval(function () {
     var p = document.getElementById('progress');
     if (!p || p.dataset.active !== '1') { clearInterval(timer); return; }
-    fetch(location.pathname + location.search + (location.search ? '&' : '?') + '_=' + Date.now(), { cache: 'no-store' })
-      .then(function (r) { return r.text(); })
+    var slug = decodeURIComponent(location.pathname.replace(/^\\/t\\//, '').replace(/\\/$/, ''));
+    fetch('/api/articles/' + encodeURIComponent(slug), { cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (m) {
+        if (!m || String(m.updatedAt) === p.dataset.updated) return null;
+        return fetch(location.pathname + location.search + (location.search ? '&' : '?') + '_=' + Date.now(), { cache: 'no-store' })
+          .then(function (r) { return r.text(); });
+      })
       .then(function (t) {
+        if (!t) return;
         var d = new DOMParser().parseFromString(t, 'text/html');
         var np = d.getElementById('progress');
         if (!np || np.dataset.updated === p.dataset.updated) return;
@@ -191,9 +200,16 @@ const STYLED_POLL = `
   var timer = setInterval(function () {
     var p = document.getElementById('progress');
     if (!p || p.dataset.active !== '1') { clearInterval(timer); return; }
-    fetch(location.pathname + location.search + (location.search ? '&' : '?') + '_=' + Date.now(), { cache: 'no-store' })
-      .then(function (r) { return r.text(); })
+    var slug = decodeURIComponent(location.pathname.replace(/^\\/t\\//, '').replace(/\\/$/, ''));
+    fetch('/api/articles/' + encodeURIComponent(slug), { cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (m) {
+        if (!m || String(m.updatedAt) === p.dataset.updated) return null;
+        return fetch(location.pathname + location.search + (location.search ? '&' : '?') + '_=' + Date.now(), { cache: 'no-store' })
+          .then(function (r) { return r.text(); });
+      })
       .then(function (t) {
+        if (!t) return;
         var d = new DOMParser().parseFromString(t, 'text/html');
         var np = d.getElementById('progress');
         if (np && np.dataset.updated === p.dataset.updated) return;
@@ -317,6 +333,8 @@ function zhTable(b, blocks) {
 
 function docBlockHtml(b, blocks, tables) {
   if (b.k === 'table') {
+    // 没有 tkey 的表格是 OCR 识别出来的（MinerU 返回的 <table>），没有原始版式可还原，按通用方式（去掉所有属性）显示
+    if (b.tkey == null) return blockHtml(b);
     const raw = tables.get(b.tkey);
     if (!raw) return '';
     return `<div class="tscroll"><div class="torig" style="position:relative;width:${Number(b.w) || 468}pt;height:${Number(b.h) || 0}pt;margin:0 auto">${raw}</div>${zhTable(b, blocks)}</div>`;
@@ -352,7 +370,8 @@ const DOC_CSS = `
   .dh { margin-top:1.1em; text-align:left; line-height:1.3; }
   .dz { margin-top:-.15em; }
   .fig { margin:.6em 0 1em; text-align:center; } .fig img { display:inline-block; }
-  .tscroll { overflow-x:auto; margin:.4em 0 1em; }
+  .tscroll, .table-wrap { overflow-x:auto; margin:.4em 0 1em; }
+  .table-wrap table { border-collapse:collapse; font:9pt Georgia,serif; } .table-wrap td, .table-wrap th { border:1px solid #ccc; padding:3px 8px; vertical-align:top; }
   .zt-cap { margin:.5em 0 .2em; font:8pt Arial,sans-serif; color:#17406b; }
   .zt { border-collapse:collapse; width:100%; font:9pt Georgia,"Songti SC","Noto Serif CJK SC",serif; color:#17406b; }
   .zt td { padding:2px 6px; border-bottom:1px solid #e3e3e3; vertical-align:top; } .zt td.num { text-align:right; white-space:nowrap; }

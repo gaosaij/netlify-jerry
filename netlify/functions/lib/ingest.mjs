@@ -7,6 +7,7 @@ import {
 import { looksPositioned, parsePositioned } from './positioned.mjs';
 import { config as translateConfig, autoTranslateMaxChars, pendingChars } from './translate.mjs';
 import { mineruConfig } from './mineru.mjs';
+import { safeFetch } from './safe-fetch.mjs';
 import { externalizeDataUris, hasBigDataUri, singleFileUrl } from './assets.mjs';
 
 export const syncLimit = () => Number(process.env.SYNC_LIMIT_BYTES) || 3 * 1024 * 1024;        // 超过这个大小的网页交给后台函数处理（同步函数有超时限制）
@@ -36,13 +37,11 @@ const httpError = (message, status) => Object.assign(new Error(message), { statu
 
 // 抓取网页。syncLimit：读到超过这个大小就放弃并返回 { large: true }，让调用方改走后台处理
 export async function fetchPage(url, { syncLimit = 0, timeoutMs = 25000 } = {}) {
-  let u;
-  try { u = new URL(url); } catch { throw httpError('网址格式不正确', 400); }
-  if (!/^https?:$/.test(u.protocol)) throw httpError('只支持 http / https 网址', 400);
-  const res = await fetch(u, { redirect: 'follow', headers: fetchHeaders(), signal: AbortSignal.timeout(timeoutMs) });
-  if (!res.ok) throw httpError(`抓取失败：对方网站返回 ${res.status}${blockedHint(u.href, res.status)}`, 502);
+  // 地址由管理员输入，但重定向目标由对方网站决定：safeFetch 拒绝本机/内网地址，每一跳重定向都重新检查
+  const res = await safeFetch(url, { headers: fetchHeaders(), signal: AbortSignal.timeout(timeoutMs) });
+  const finalUrl = res.finalUrl;
+  if (!res.ok) throw httpError(`抓取失败：对方网站返回 ${res.status}${blockedHint(finalUrl, res.status)}`, 502);
   const type = res.headers.get('content-type') || '';
-  const finalUrl = res.url || u.href;
   if (/pdf/i.test(type)) {
     await res.body?.cancel(); // PDF 不在这里下载，交给 MinerU 自己去取
     return { pdf: true, finalUrl };
@@ -69,7 +68,7 @@ export async function saveBilingual({ origin, slug, title, blocks, html, tables,
   if (!textBlocks.length && !candidates.length) throw httpError('没有从文章里提取到正文', 400);
 
   const hash = contentHash(blocks);
-  const dup = (await listMeta()).find((m) => m.hash === hash && m.slug !== slug);
+  const dup = (await listMeta({ fresh: true })).find((m) => m.hash === hash && m.slug !== slug);
   if (dup) throw Object.assign(new Error(`这篇文章已经存在：${dup.title}`), { status: 409, slug: dup.slug });
 
   const info = analyze(blocks);
@@ -101,6 +100,16 @@ export async function saveBilingual({ origin, slug, title, blocks, html, tables,
     meta.ocrDone = 0; meta.ocrTotal = candidates.length;
     meta.ocr = { mode: 'images', translate, jobs: candidates.map((c, i) => ({ ...c, state: 'pending', name: `img-${i}${imageExt(c.src)}` })) };
     next = 'ocr-background';
+  } else if (info.total === 0) {
+    // 没有任何可翻译的文字（整页都是图片，或只有数字符号）
+    if (candidates.length) {
+      meta.status = 'idle';
+      meta.note = `没有可翻译的文字；里面有 ${candidates.length} 张整页图片（可能是 PDF 页面），文字在图里，` +
+        (translate ? '配置 MINERU_API_TOKEN 后可自动识别' : '因为没有选择翻译，没有识别');
+    } else {
+      meta.status = 'done';
+      meta.note = '没有需要翻译的英文内容';
+    }
   } else if (translate) {
     if (!translateConfig().key) {
       meta.error = '尚未配置 OPENAI_API_KEY，文章已保存，配置后在管理页点“开始翻译”';
@@ -111,7 +120,7 @@ export async function saveBilingual({ origin, slug, title, blocks, html, tables,
       next = 'translate-background';
     }
   }
-  if (candidates.length && !meta.ocr && !info.alreadyChinese) {
+  if (candidates.length && !meta.ocr && !info.alreadyChinese && info.total > 0) {
     const why = !translate ? '因为没有选择翻译，没有识别' : '配置 MINERU_API_TOKEN 后可自动识别';
     meta.note = (meta.note ? meta.note + '；' : '') + `里面有 ${candidates.length} 张整页图片（可能是 PDF 页面），文字在图里没有被翻译（${why}）`;
   }
