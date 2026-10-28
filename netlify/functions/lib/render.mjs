@@ -1,6 +1,7 @@
 // 渲染中英对照页：一段英文、一段中文；翻译未完成时顶部显示进度并自动刷新
 import { Marked } from 'marked';
 import * as cheerio from 'cheerio';
+import { VIEWMODE_CSS, viewModeHeadScript, viewModeBodyScript, showViewMode } from './viewmode.mjs';
 
 export const esc = (s) =>
   String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -161,7 +162,8 @@ export function renderPage(meta, doc, nonce, pageNo = 1) {
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>${esc(meta.title)}</title>
-<style>${CSS}</style>
+<style>${CSS}${showViewMode(meta) ? VIEWMODE_CSS : ''}</style>
+${showViewMode(meta) ? viewModeHeadScript(nonce) : ''}
 </head>
 <body>
   <main>
@@ -174,6 +176,7 @@ ${body}
     ${pager}
   </main>
 ${active ? `<script nonce="${nonce}">${POLL}</script>` : ''}
+${showViewMode(meta) ? viewModeBodyScript(nonce) : ''}
 </body>
 </html>`;
 }
@@ -240,6 +243,10 @@ export function renderStyledPage(meta, doc, html, nonce) {
     (text ? ` style="${FIXED_BOX}">${text}` : ' style="display:none">') + '</div>';
   $('body').append(box);
   if (active) $('body').append(`<script nonce="${nonce}">${STYLED_POLL}</script>`);
+  if (showViewMode(meta)) {
+    $('head').append(`<style>${VIEWMODE_CSS}</style>${viewModeHeadScript(nonce)}`);
+    $('body').append(viewModeBodyScript(nonce));
+  }
   return $.html();
 }
 
@@ -365,7 +372,8 @@ export function renderDocPage(meta, doc, tables, nonce, viewNo = 1) {
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>${esc(meta.title)}</title>
-<style>${DOC_CSS}</style>
+<style>${DOC_CSS}${showViewMode(meta) ? VIEWMODE_CSS : ''}</style>
+${showViewMode(meta) ? viewModeHeadScript(nonce) : ''}
 </head>
 <body>
   <main>
@@ -378,6 +386,7 @@ ${body}
     ${pager}
   </main>
 ${active ? `<script nonce="${nonce}">${POLL}</script>` : ''}
+${showViewMode(meta) ? viewModeBodyScript(nonce) : ''}
 </body>
 </html>`;
 }

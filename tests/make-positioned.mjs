@@ -59,7 +59,7 @@ function layout(text, startTop, n = 70, indent = true) {
   return rows.map((t, i) => ({ top: startTop + i * LINE, text: t, left: indent && i === 0 ? 86 : 72 }));
 }
 
-export function samplePositionedHtml() {
+export function samplePositionedHtml(imagePages = ['pg1a.jpg']) {
   const H = 'Sample Company, Inc.';
   const p = [];
   const pageLines = (parts) => {
@@ -97,7 +97,7 @@ export function samplePositionedHtml() {
     ...pageLines([{ text: filler(9) }, { text: filler(10) }]).map((l) => ({ ...l, top: l.top + 40 })),
     { top: 380, text: 'Note: Totals of the table may not foot due to rounding.', size: 8, italic: true },
   ], 3, H, tableHtml(260)));
-  p.push(imagePage('pg1a.jpg'));                       // 整页图片：文字在图里
+  imagePages.forEach((src) => p.push(imagePage(src)));   // 整页图片：文字在图里
   p.push(`<div style="background-color:#FFFFFF;border:1px solid #CCCC;height:792pt;position:relative;width:612pt"><div style="position:absolute"><img style="height:238pt;width:450pt" src="chart2a.jpg" alt="chart2a.jpg"></div></div>`); // 普通图表：不 OCR
   p.push(textPage(pageLines([{ text: filler(11) }, { text: filler(12) }, { text: filler(13) }]), 6, H));
   p.push(textPage(pageLines([{ text: filler(14) }, { text: filler(15) }, { text: filler(16) }, { text: filler(17) }]), 7, H));

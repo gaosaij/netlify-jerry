@@ -145,7 +145,9 @@ async function route(req, path) {
   }
 
   if (req.method === 'POST' && a === 'import') {
-    const { url, translate = true, title: givenTitle = '' } = await req.json();
+    const body = await req.json();
+    const { url, translate = true, title: givenTitle = '' } = body;
+    const origPath = /^\/[^\s]{0,500}$/.test(body.origPath || '') ? body.origPath : ''; // 站内文章的原路径（管理页指定）
     const page = await fetchPage(url, { syncLimit: syncLimit() });
     if (page.pdf) {
       const meta = await createOcrArticle({ origin, title: givenTitle, url: page.finalUrl, translate, filename: decodeURIComponent(new URL(page.finalUrl).pathname.split('/').pop() || 'document.pdf') });
@@ -159,7 +161,7 @@ async function route(req, path) {
       const meta = {
         slug: makeSlug(givenTitle || new URL(page.finalUrl).hostname), kind: 'bilingual', source: 'import', sourceUrl: page.finalUrl,
         title: givenTitle.trim() || page.finalUrl, status: 'importing', total: 0, done: 0, createdAt: now, updatedAt: now,
-        ingest: { url: page.finalUrl, translate, title: givenTitle },
+        ingest: { url: page.finalUrl, translate, title: givenTitle, origPath },
       };
       await setJSON(`doc/${meta.slug}`, { blocks: [] });
       await setJSON(`meta/${meta.slug}`, meta);
@@ -172,7 +174,7 @@ async function route(req, path) {
       const meta = await saveRaw({ html: page.html, finalUrl: page.finalUrl, title: givenTitle });
       return json(publicMeta(meta), 201);
     }
-    const meta = await ingestHtml({ origin, html: page.html, finalUrl: page.finalUrl, title: givenTitle, translate: true });
+    const meta = await ingestHtml({ origin, html: page.html, finalUrl: page.finalUrl, title: givenTitle, translate: true, origPath });
     return json(publicMeta(meta), 201);
   }
 

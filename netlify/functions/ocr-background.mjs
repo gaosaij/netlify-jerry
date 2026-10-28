@@ -9,28 +9,59 @@ import { fetchHeaders, blockedHint } from './lib/ingest.mjs';
 import { kick } from './lib/kick.mjs';
 import { mineruConfig, createUrlTask, getTask, createUploadBatch, putFile, getBatch, fetchResult } from './lib/mineru.mjs';
 
-const BUDGET_MS = 12 * 60 * 1000;
+const budgetMs = () => Number(process.env.OCR_BUDGET_MS) || 12 * 60 * 1000;
 const LOCK_MS = 6 * 60 * 1000;
 const POLL_MS = Number(process.env.OCR_POLL_MS) || 5000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// 并发执行：同时最多 size 个
+async function pool(items, size, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(size, items.length) }, async () => {
+    while (next < items.length) { const i = next++; out[i] = await fn(items[i], i); }
+  }));
+  return out;
+}
+
+// 整页图片：每 6 张一组——并发下载（服务器自己带 User-Agent 抓图，有的网站如 SEC 不允许 MinerU 直接取），
+// 为这一组申请上传地址并并发上传，然后保存进度。可以随时中断、从断点继续（已上传的图片不会重传）；
+// 单张图片下载失败只会让这一张失败，不影响其它。
+const GROUP = 6;
+async function submitImages(o, ctx) {
+  o.batches = o.batches || [];
+  const todo = o.jobs.filter((j) => !j.batch && j.state !== 'failed');
+  for (let i = 0; i < todo.length; i += GROUP) {
+    const got = await pool(todo.slice(i, i + GROUP), 3, async (j) => {
+      try {
+        const res = await fetch(j.src, { headers: fetchHeaders('image/*'), signal: AbortSignal.timeout(90000) });
+        if (!res.ok) throw new Error(`下载图片失败（HTTP ${res.status}）${blockedHint(j.src, res.status)}`);
+        return { j, buf: Buffer.from(await res.arrayBuffer()) };
+      } catch (e) {
+        j.state = 'failed'; j.err = e.message;
+        return null;
+      }
+    });
+    const ok = got.filter(Boolean);
+    if (ok.length) {
+      const { batchId, urls } = await createUploadBatch(ok.map((g) => ({ name: g.j.name })));
+      if (!urls || urls.length !== ok.length) throw new Error('MinerU 返回的上传地址数量不对');
+      await pool(ok, 3, (g, k) => putFile(urls[k], g.buf));
+      o.batches.push({ id: batchId, names: ok.map((g) => g.j.name) });
+      ok.forEach((g) => { g.j.batch = batchId; });
+    }
+    ctx.meta.note = `正在把整页图片上传给 MinerU：${o.jobs.filter((j) => j.batch).length} / ${o.jobs.length}`;
+    ctx.meta.lockAt = Date.now();
+    if (!(await ctx.save())) return 'deleted';
+    if (i + GROUP < todo.length && Date.now() - ctx.started > budgetMs()) return 'handoff';
+  }
+  return 'done';
+}
+
 // 提交：网址模式逐个提交任务；上传模式先把分块拼成完整 PDF，申请上传地址后 PUT 上去
 async function submit(o) {
   if (o.mode === 'images') {
-    // 整页图片：服务器自己带 User-Agent 抓图（有的网站如 SEC 不允许 MinerU 直接取），再批量传给 MinerU（每批最多 50 个文件）
-    o.batches = [];
-    for (let i = 0; i < o.jobs.length; i += 50) {
-      const group = o.jobs.slice(i, i + 50);
-      const { batchId, urls } = await createUploadBatch(group.map((j) => ({ name: j.name })));
-      if (!urls || urls.length !== group.length) throw new Error('MinerU 返回的上传地址数量不对');
-      for (let k = 0; k < group.length; k++) {
-        const res = await fetch(group[k].src, { headers: fetchHeaders('image/*'), signal: AbortSignal.timeout(120000) });
-        if (!res.ok) throw new Error(`下载图片失败：${group[k].src}（HTTP ${res.status}）${blockedHint(group[k].src, res.status)}`);
-        await putFile(urls[k], Buffer.from(await res.arrayBuffer()));
-      }
-      o.batches.push({ id: batchId, names: group.map((j) => j.name) });
-    }
-    return;
+    throw new Error('整页图片模式请使用 submitImages');
   }
   if (o.mode === 'url') {
     for (const j of o.jobs) if (!j.taskId) j.taskId = await createUrlTask(o.url, j.range);
@@ -64,6 +95,7 @@ async function poll(o) {
   }
   let pagesDone = 0, pagesTotal = 0;
   o.jobs.forEach((j, i) => {
+    if (o.mode === 'images' && !j.batch) return; // 下载失败的图片保持“失败”状态
     const r = results[i];
     j.state = r.state === 'done' ? 'done' : r.state === 'failed' ? 'failed' : 'running';
     j.zip = r.zip || j.zip;
@@ -79,7 +111,7 @@ async function poll(o) {
 // 把识别出的图片存起来，Markdown 里的 images/xx 改成本站地址
 async function collect(slug, o) {
   const mds = [];
-  for (const j of o.jobs) {
+  for (const j of o.jobs.filter((x) => x.state === 'done')) {
     const { md, images } = await fetchResult(j.zip);
     for (const [name, data] of Object.entries(images)) await setBinary(`img/${slug}/${name}`, Buffer.from(data));
     mds.push(md.replace(/\]\((?:\.\/)?images\/([^)\s]+)\)/g, `](/api/img/${slug}/$1)`));
@@ -111,8 +143,23 @@ export default async (req) => {
     meta.status = 'ocr'; meta.error = ''; meta.lockAt = Date.now();
     if (!(await save())) return;
 
-    const submitted = o.mode === 'url' ? o.jobs.every((j) => j.taskId) : o.mode === 'images' ? !!o.batches : !!o.batchId;
-    if (!submitted) { await submit(o); if (!(await save())) return; }
+    if (o.mode === 'images') {
+      if (!o.jobs.every((j) => j.batch || j.state === 'failed')) {
+        const r = await submitImages(o, { meta, save, started });
+        if (r === 'deleted') return;
+        if (r === 'handoff') { // 时间快到了：保存进度，交给新的一次调用继续上传剩下的图片
+          meta.lockAt = 0;
+          await save();
+          await kick(origin, 'ocr-background', slug);
+          return;
+        }
+      }
+      meta.note = '';
+      if (o.jobs.every((j) => j.state === 'failed')) throw new Error(`所有整页图片都下载失败：${o.jobs[0].err}`);
+    } else {
+      const submitted = o.mode === 'url' ? o.jobs.every((j) => j.taskId) : !!o.batchId;
+      if (!submitted) { await submit(o); if (!(await save())) return; }
+    }
 
     let failures = 0;
     for (;;) {
@@ -126,9 +173,16 @@ export default async (req) => {
       meta.lockAt = Date.now();
       if (!(await save())) return;
       const bad = o.jobs.find((j) => j.state === 'failed');
-      if (bad) throw new Error(`MinerU 识别失败：${bad.err || '未知原因'}${bad.range ? `（页码 ${bad.range}）` : ''}`);
-      if (o.jobs.every((j) => j.state === 'done')) break;
-      if (Date.now() - started > BUDGET_MS) {
+      if (o.mode === 'images') {
+        // 整页图片：个别失败不影响其它，全部失败才算失败
+        const live = o.jobs.filter((j) => j.state !== 'failed');
+        if (!live.length) throw new Error(`MinerU 识别失败：${bad.err || '未知原因'}`);
+        if (live.every((j) => j.state === 'done')) break;
+      } else {
+        if (bad) throw new Error(`MinerU 识别失败：${bad.err || '未知原因'}${bad.range ? `（页码 ${bad.range}）` : ''}`);
+        if (o.jobs.every((j) => j.state === 'done')) break;
+      }
+      if (Date.now() - started > budgetMs()) {
         meta.lockAt = 0;
         await save();
         await kick(origin, 'ocr-background', slug);
@@ -143,7 +197,7 @@ export default async (req) => {
       // 每张图识别出的文字追加到文章末尾（ocrAfter = 这张图在文章里的位置），显示时放回图片后面
       const doc = (await getJSON(`doc/${slug}`)) || { blocks: [] };
       doc.blocks = doc.blocks.filter((b) => b.ocrAfter == null); // 重试时避免重复追加
-      for (const j of o.jobs) {
+      for (const j of o.jobs.filter((x) => x.state === 'done')) { // 下载/识别失败的图片跳过
         const { md } = await fetchResult(j.zip);
         const text = md.replace(/!\[[^\]]*\]\([^)]*\)/g, ''); // 图片里再裁出的小图不保留
         for (const b of parseMarkdown(text).blocks) doc.blocks.push({ ...b, ocrAfter: j.tid });
@@ -151,6 +205,8 @@ export default async (req) => {
       blocks = doc.blocks;
       await setJSON(`doc/${slug}`, doc);
       if (!blocks.some((b) => b.ocrAfter != null)) meta.note = 'MinerU 没有从这些整页图片里识别出文字';
+      const failedImgs = o.jobs.filter((j) => j.state === 'failed');
+      if (failedImgs.length) meta.note = (meta.note ? meta.note + '；' : '') + `${failedImgs.length} 张整页图片没能识别（${failedImgs[0].err}）`;
     } else {
       const md = await collect(slug, o);
       const parsed = parseMarkdown(md);

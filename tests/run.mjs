@@ -320,6 +320,83 @@ ok('大网页：先建占位，后台抓取解析，再 OCR 和翻译');
   ok('仅搬运（含大网页）不 OCR、不翻译；不自动翻译的上传也不 OCR');
 }
 
+// ---- 右上角“中英对照 / 仅英文”切换按钮：三种版式都有；已有中文的文章没有 ----
+{
+  const mk = async (fn) => { const m = await fn(); await waitDone(m.slug, 30000); return (await fetch(`${origin}/t/${m.slug}`)).text(); };
+  const pages = {
+    通用对照排版: await mk(async () => (await (await post('/api/upload', { filename: 'vm.md', content: '# View mode\n\nToggle test paragraph for the view mode of the page.', translate: true })).json())),
+    保留原样式: await mk(async () => (await (await post('/api/import', { url: origin + '/sample/en4', translate: true })).json())),
+    PDF文档版式: await mk(async () => (await (await post('/api/import', { url: origin + '/sample/multi.htm?tag=T&imgs=', translate: true })).json())),
+  };
+  for (const [name, html] of Object.entries(pages)) {
+    assert.ok(html.includes("html.en-only .zh, html.en-only .zh-tr, html.en-only .dz"), name + '：有隐藏译文的样式');
+    assert.ok(html.includes("id = 'vm-toggle'") && html.includes('中英对照') && html.includes('仅英文'), name + '：有切换按钮脚本');
+    assert.ok(html.includes("localStorage.getItem('viewMode')==='en'") , name + '：页面显示前就应用上次的选择');
+    assert.ok(/<script nonce="[^"]+">\s*\(function \(\) \{\s+var KEY/.test(html), name + '：脚本带 nonce，符合 CSP');
+  }
+  const zhMeta = await (await post('/api/upload', { filename: 'zh-only.txt', content: '这是一篇已经是中文的文章，不需要再翻译。\n\n第二段同样是中文内容，用来测试检测逻辑。', translate: true })).json();
+  assert.equal(zhMeta.status, 'skip');
+  const skipSlug = zhMeta.slug;
+  const skipHtml = await (await fetch(`${origin}/t/${skipSlug}`)).text();
+  assert.ok(!skipHtml.includes('vm-toggle'), '已有中文的文章不需要切换按钮');
+  ok('“中英对照 / 仅英文”按钮：通用排版、保留原样式、PDF 文档版式都有，已有中文的文章没有');
+}
+
+// ---- 站内文章的“原路径”：Netlify 会把 .html 地址跳转成小写、无后缀的地址 ----
+{
+  meta = await (await post('/api/import', { url: origin + '/articles-sim/Static_Article.html', translate: true, origPath: '/articles-sim/Static_Article.html' })).json();
+  assert.equal((await getJSON(`meta/${meta.slug}`)).origPath, '/articles-sim/Static_Article.html', '管理页指定的原路径被如实记录，而不是跳转后的地址');
+  await waitDone(meta.slug);
+  assert.equal((await getJSON(`meta/${meta.slug}`)).sourceUrl, origin + '/articles-sim/static_article', '来源地址是跳转后的真实地址');
+  // 管理页、首页用的宽松比较：能对上你实际遇到的两个地址
+  const grab = (file, re) => new Function(`return (${file.match(re)[1].replace(/;\s*$/, '')})`)();
+  const adminFn = grab(fs.readFileSync(new URL('../admin/index.html', import.meta.url), 'utf8'), /const normPath = ([^\n]+)/);
+  const homeFn = grab(fs.readFileSync(new URL('../index.template.html', import.meta.url), 'utf8'), /var norm = ([^\n]+)/);
+  for (const norm of [adminFn, homeFn]) {
+    assert.equal(
+      norm('/articles/It_Helps_to_Ask_-_The_Cumulative_Benefits_of_Asking_Follow-Up_Questions.html'),
+      norm('/articles/it_helps_to_ask_-_the_cumulative_benefits_of_asking_follow-up_questions'));
+    assert.equal(norm('/articles/Intimacy_as_an_Interpersonal_Process_-_The_Importance_of_Self-Disclosure%2C_Partner_Disclosure.html'),
+      norm('/articles/intimacy_as_an_interpersonal_process_-_the_importance_of_self-disclosure,_partner_disclosure'));
+    assert.notEqual(norm('/articles/a.html'), norm('/articles/b.html'));
+  }
+  ok('站内文章原路径：指定的路径如实记录；管理页和首页的路径比较能对上被 Netlify 改写的地址');
+}
+
+// ---- 整页图片 OCR：个别失败、全部失败、超时交棒 ----
+{
+  const run = async (imgs, tag) => {
+    const r = await post('/api/import', { url: `${origin}/sample/multi.htm?tag=${tag}&imgs=${imgs}`, translate: true });
+    assert.equal(r.status, 201, await r.clone().text());
+    return waitDone((await r.json()).slug, 30000);
+  };
+  // 一张下载失败：其它照常识别，文章完成并在备注里说明
+  const b0 = mineru.batches.size;
+  meta = await run('pg1a.jpg,pg-missing.jpg,pg2a.jpg', 'F');
+  assert.equal(meta.status, 'done', JSON.stringify(meta));
+  const bs = [...mineru.batches.values()].slice(b0);
+  assert.deepEqual(bs.flatMap((b) => b.files.map((f) => f.name)), ['img-0.jpg', 'img-2.jpg'], '失败的那张不提交给 MinerU');
+  assert.ok(meta.note.includes('1 张整页图片没能识别') && meta.note.includes('404'), meta.note);
+  let pg = await (await fetch(`${origin}/t/${meta.slug}`)).text();
+  assert.equal((pg.match(/>Paragraph text from b\d+-\d about habits\./g) || []).length, 2, '两张成功的图都有识别文字');
+  // 全部失败：明确报错
+  meta = await run('pg-missing.jpg', 'G');
+  assert.equal(meta.status, 'error');
+  assert.ok(meta.error.includes('下载失败') && meta.error.includes('404'), meta.error);
+  // 超过时间预算：保存进度、交棒给新的调用，已上传的图片不重传
+  process.env.OCR_BUDGET_MS = '1';
+  const b1 = mineru.batches.size, put1 = mineru.puts.length;
+  meta = await run('pg1a.jpg,pg2a.jpg,pg3a.jpg,pg4a.jpg,pg5a.jpg,pg6a.jpg,pg7a.jpg,pg8a.jpg', 'H');
+  process.env.OCR_BUDGET_MS = '';
+  assert.equal(meta.status, 'done', JSON.stringify(meta));
+  const bs2 = [...mineru.batches.values()].slice(b1);
+  assert.deepEqual(bs2.map((b) => b.files.length), [6, 2], '分成两组（6 + 2），中途交棒一次');
+  assert.equal(mineru.puts.length - put1, 8, '每张图只上传一次');
+  pg = await (await fetch(`${origin}/t/${meta.slug}`)).text();
+  assert.equal((pg.match(/>Paragraph text from b\d+-\d about habits\./g) || []).length, 8, '8 张图都识别了');
+  ok('整页图片 OCR：个别失败不影响其它、全部失败明确报错、超时交棒后继续且不重传');
+}
+
 // ---- 大 HTML 分块上传（SingleFile 保存的网页：图片、字体以 base64 内联）----
 {
   const font = randomBytes(40000), img1 = randomBytes(1500000), img2 = randomBytes(1500000), img3 = randomBytes(1500000);

@@ -79,7 +79,14 @@ export async function startDevServer({ port = 0, mockLlm = true } = {}) {
     if (url.pathname === '/sample/en') return text(sampleEn);
     if (url.pathname === '/sample/s1.htm') return text(samplePositionedHtml());
     if (url.pathname === '/sample/s1b.htm') return text(samplePositionedHtml().replace(/Filler paragraph/g, 'Variant paragraph').replace('Sample Company S-1', 'Sample Company S-1 Big'));
-    if (url.pathname === '/sample/pg1a.jpg' || url.pathname === '/sample/chart2a.jpg') {
+    // 多张整页图片的测试页：pgN.jpg 正常，pg-missing.jpg 返回 404
+    if (url.pathname === '/sample/multi.htm') {
+      const names = (url.searchParams.get('imgs') || '').split(',').filter(Boolean);
+      const tag = url.searchParams.get('tag') || 'M';
+      return text(samplePositionedHtml(names).replace(/Filler paragraph/g, `${tag} paragraph`).replace('Sample Company S-1', `Sample Company S-1 ${tag}`));
+    }
+    if (url.pathname === '/sample/pg-missing.jpg') return text('nope', 'text/plain', 404);
+    if (/^\/sample\/pg\d+a\.jpg$/.test(url.pathname) || url.pathname === '/sample/pg1a.jpg' || url.pathname === '/sample/chart2a.jpg') {
       stats.imageUAs.push(nodeReq.headers['user-agent']);
       nodeRes.writeHead(200, { 'content-type': 'image/jpeg' });
       return nodeRes.end(Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]));
@@ -89,6 +96,13 @@ export async function startDevServer({ port = 0, mockLlm = true } = {}) {
       if (!/@/.test(nodeReq.headers['user-agent'] || '')) return text('<html><title>Undeclared Automated Tool</title></html>', 'text/html', 403);
       return text(sampleEn.replace('Habits are formed through repetition', 'Markets are formed through repetition'));
     }
+    // 模拟 Netlify 的 pretty URLs：.html 地址 301 跳转成小写、无后缀的地址
+    if (url.pathname === '/articles-sim/Static_Article.html') {
+      nodeRes.writeHead(301, { location: '/articles-sim/static_article' });
+      return nodeRes.end();
+    }
+    if (url.pathname === '/articles-sim/static_article') return text(sampleEn.replace('Habits are formed through repetition', 'Redirects are followed correctly'));
+    if (url.pathname === '/sample/en4') return text(sampleEn.replace('Habits are formed through repetition', 'Toggles are tested through repetition'));
     if (url.pathname === '/sample/en2') return text(sampleEn.replace('Habits are formed through repetition', 'Sleep is restored through rest'));
     if (url.pathname === '/sample/dual') return text(sampleDual);
     if (url.pathname === '/sample/notfound') return text('nope', 'text/plain', 404);

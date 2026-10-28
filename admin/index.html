@@ -215,6 +215,8 @@ async function refresh() {
 }
 
 // ---- 站内已有文章：读取构建时生成的 articles-index.json，一键搬运并翻译 ----
+// 路径宽松比较：忽略大小写、.html 后缀、百分号编码、结尾斜杠（Netlify 会把 .html 地址跳转成小写且无后缀的地址）
+const normPath = (p) => { try { p = decodeURIComponent(p); } catch { /* 保持原样 */ } return p.replace(/\.html?$/i, '').replace(/\/+$/, '').toLowerCase(); };
 let siteList = [];
 async function renderSite(articles) {
   const idx = await fetch('/articles-index.json', { cache: 'no-store' }).then((r) => r.ok ? r.json() : []).catch(() => []);
@@ -222,7 +224,7 @@ async function renderSite(articles) {
   const box = $('site');
   box.replaceChildren();
   idx.forEach((a) => {
-    const done = articles.find((m) => m.origPath === decodeURI(a.href) || m.origPath === a.href);
+    const done = articles.find((m) => m.origPath && normPath(m.origPath) === normPath(a.href));
     const row = document.createElement('div');
     row.className = 'item';
     const t = document.createElement('div'); t.className = 't'; t.textContent = a.title;
@@ -245,7 +247,7 @@ async function renderSite(articles) {
 async function importSite(list) {
   for (const a of list) {
     say('siteMsg', '正在提交：' + a.title);
-    try { await api('import', { method: 'POST', body: JSON.stringify({ url: location.origin + a.href, title: a.title, translate: true }) }); }
+    try { await api('import', { method: 'POST', body: JSON.stringify({ url: location.origin + a.href, title: a.title, translate: true, origPath: a.href }) }); }
     catch (e) { say('siteMsg', a.title + '：' + e.message, 'err'); await refresh(); return; }
   }
   say('siteMsg', '已提交，后台正在翻译，进度见下方“所有文章”', 'ok');

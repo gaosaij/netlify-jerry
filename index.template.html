@@ -87,6 +87,8 @@
 <script>
 // 读取通过管理页上传/搬运的文章，插入到置顶项之后（读取失败就只显示上面的静态列表）
 (function () {
+  // 路径宽松比较：忽略大小写、.html 后缀、百分号编码、结尾斜杠（Netlify 会把 .html 地址跳转成小写且无后缀的地址）
+  var norm = function (p) { try { p = decodeURIComponent(p); } catch (e) {} return p.replace(/\.html?$/i, '').replace(/\/+$/, '').toLowerCase(); };
   var STATUS = { importing: '正在抓取解析', ocr: 'OCR 识别中', idle: '尚未翻译', queued: '排队翻译中', translating: '翻译中', error: '翻译中断，可到管理页继续' };
   fetch('/api/articles', { cache: 'no-store' })
     .then(function (r) { return r.ok ? r.json() : []; })
@@ -100,7 +102,7 @@
         // 站内静态文章已经有对照版时，隐藏英文原版，只显示对照版
         if (m.origPath) {
           ul.querySelectorAll('a.article').forEach(function (x) {
-            if (x.getAttribute('href') === m.origPath) x.parentNode.remove();
+            if (norm(x.getAttribute('href')) === norm(m.origPath)) x.parentNode.remove();
           });
         }
         var desc = m.kind === 'raw' ? '搬运的网页'

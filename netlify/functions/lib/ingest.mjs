@@ -63,7 +63,7 @@ export async function fetchPage(url, { syncLimit = 0, timeoutMs = 25000 } = {}) 
 }
 
 // 保存一篇需要对照翻译的文章。slug 已存在（后台导入先建了占位）时更新它
-export async function saveBilingual({ origin, slug, title, blocks, html, tables, source, sourceUrl, translate, ocrImages = true }) {
+export async function saveBilingual({ origin, slug, title, blocks, html, tables, source, sourceUrl, origPath, translate, ocrImages = true }) {
   const textBlocks = blocks.filter((b) => b.k !== 'img');
   const candidates = blocks.map((b, i) => (b.big ? { tid: i, src: b.src } : null)).filter(Boolean).slice(0, MAX_OCR_IMAGES);
   if (!textBlocks.length && !candidates.length) throw httpError('没有从文章里提取到正文', 400);
@@ -85,8 +85,10 @@ export async function saveBilingual({ origin, slug, title, blocks, html, tables,
   if (tables) meta.layout = 'doc';
   else if (html) meta.layout = 'page';
   else delete meta.layout;
-  // 搬运的是本站自己的静态文章：记下原路径，首页据此隐藏英文原版
-  if (sourceUrl && new URL(sourceUrl).origin === origin) meta.origPath = new URL(sourceUrl).pathname;
+  // 搬运的是本站自己的静态文章：记下原路径，首页据此隐藏英文原版。
+  // 优先用调用方指定的路径（管理页知道文章清单里的地址）；Netlify 会把 .html 地址跳转成小写、去掉后缀的地址，不能靠跳转后的地址
+  if (origPath) meta.origPath = origPath;
+  else if (sourceUrl && new URL(sourceUrl).origin === origin) meta.origPath = new URL(sourceUrl).pathname;
 
   let next = null; // 保存后要启动的后台任务
   if (info.alreadyChinese) {
@@ -135,7 +137,7 @@ export const imageExt = (src) => {
 };
 
 // 解析一篇 HTML 并保存。PDF 转出来的网页（逐行绝对定位）按坐标还原段落；普通网页保留原样式
-export async function ingestHtml({ origin, html, finalUrl, title, translate, slug, source = 'import' }) {
+export async function ingestHtml({ origin, html, finalUrl, title, translate, slug, source = 'import', origPath }) {
   // SingleFile 保存的网页：文件开头的注释里有原网址，用它做来源和相对链接的基准
   const sourceUrl = finalUrl || singleFileUrl(html) || undefined;
   let externalized = false;
@@ -155,7 +157,7 @@ export async function ingestHtml({ origin, html, finalUrl, title, translate, slu
     }
     return await saveBilingual({
       origin, slug, title: (title || '').trim() || parsed.title || (sourceUrl ? new URL(sourceUrl).hostname : ''),
-      blocks: parsed.blocks, html: page, tables: parsed.tables, source, sourceUrl, translate,
+      blocks: parsed.blocks, html: page, tables: parsed.tables, source, sourceUrl, origPath, translate,
     });
   } catch (e) {
     if (externalized) await delPrefix(`img/${slug}/`); // 失败（如重复文章）时不留下孤立的图片

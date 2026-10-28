@@ -69,10 +69,20 @@ export async function createUploadBatch(files) {
   return { batchId: data.batch_id, urls: data.file_urls };
 }
 
-// 把文件内容 PUT 到上传地址（不要设置 Content-Type；上传完成后 MinerU 自动开始解析）
+// 把文件内容 PUT 到上传地址（不要设置 Content-Type；上传完成后 MinerU 自动开始解析）。失败最多重试 3 次
 export async function putFile(url, buffer) {
-  const res = await fetch(url, { method: 'PUT', body: buffer, signal: AbortSignal.timeout(10 * 60 * 1000) });
-  if (!res.ok) throw new Error(`上传 PDF 到 MinerU 失败：HTTP ${res.status}`);
+  let last;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetch(url, { method: 'PUT', body: buffer, signal: AbortSignal.timeout(4 * 60 * 1000) });
+      if (res.ok) return;
+      last = new Error(`上传到 MinerU 失败：HTTP ${res.status}`);
+    } catch (e) {
+      last = new Error(`上传到 MinerU 失败：${e.message}`);
+    }
+    await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+  }
+  throw last;
 }
 
 export async function getBatch(batchId) {

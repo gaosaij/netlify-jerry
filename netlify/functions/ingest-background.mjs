@@ -28,7 +28,7 @@ export default async (req) => {
   try {
     meta.status = 'importing'; meta.error = ''; meta.lockAt = Date.now(); meta.updatedAt = Date.now();
     await setJSON(`meta/${slug}`, meta);
-    const { url, translate, title, mode, uploadId, chunks } = meta.ingest;
+    const { url, translate, title, mode, uploadId, chunks, origPath } = meta.ingest;
     let page;
     if (mode === 'upload') {
       // 浏览器分块上传的 HTML：把分块拼起来
@@ -47,7 +47,7 @@ export default async (req) => {
       // 选的是“仅搬运”：只保存网页，不解析、不 OCR、不翻译
       await saveRaw({ slug, html: page.html, finalUrl: page.finalUrl, title });
     } else {
-      await ingestHtml({ origin, html: page.html, finalUrl: page.finalUrl, title, translate, slug, source: mode === 'upload' ? 'upload' : 'import' });
+      await ingestHtml({ origin, html: page.html, finalUrl: page.finalUrl, title, translate, slug, source: mode === 'upload' ? 'upload' : 'import', origPath });
     }
     if (mode === 'upload') await delPrefix(`pdf/${uploadId}/`); // 处理完成，分块不再需要
   } catch (e) {
