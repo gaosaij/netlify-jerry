@@ -2,6 +2,7 @@
 import { Marked } from 'marked';
 import * as cheerio from 'cheerio';
 import { showZh } from './parse.mjs';
+import { withTopBackLink } from './backlink.mjs';
 import { VIEWMODE_CSS, viewModeHeadScript, viewModeBodyScript, showViewMode } from './viewmode.mjs';
 
 export const esc = (s) =>
@@ -219,7 +220,7 @@ const STYLED_POLL = `
 })();`;
 
 export function renderStyledPage(meta, doc, html, nonce) {
-  const $ = cheerio.load(html);
+  const $ = cheerio.load(withTopBackLink(html)); // 顶部返回链接（页面自己有就不重复加；旧版的左下角浮动链接顺手去掉）
   $('title').first().text(meta.title); // 原网页标题可能是 full 之类，用文章标题
   const byId = new Map();
   $('[data-tid]').each((_, el) => byId.set(el.attribs['data-tid'], el));

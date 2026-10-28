@@ -12,6 +12,7 @@ import { samplePositionedHtml } from './make-positioned.mjs';
 import { looksPositioned, parsePositioned } from '../netlify/functions/lib/positioned.mjs';
 import { blockedHint } from '../netlify/functions/lib/ingest.mjs';
 import { assertPublicUrl, isPrivateIp } from '../netlify/functions/lib/safe-fetch.mjs';
+import { withTopBackLink } from '../netlify/functions/lib/backlink.mjs';
 import { externalizeDataUris, singleFileUrl, hasBigDataUri } from '../netlify/functions/lib/assets.mjs';
 import { getJSON, setJSON, getText, setText, getBinary, listMeta } from '../netlify/functions/lib/store.mjs';
 import { randomBytes } from 'node:crypto';
@@ -120,6 +121,24 @@ for (const f of ['It_Helps_to_Ask_-_The_Cumulative_Benefits_of_Asking_Follow-Up_
   assert.ok(blocks[4].en.includes('before the page ends, so it must be joined'));
   ok('PDF 段落还原：去页眉页码、接连字符、合并跨页段落、识别标题');
   assert.ok(makePdf(samplePages()).length > 500);
+}
+
+// 返回链接：页面没有就在顶部加；已经有就不重复；旧版注入的左下角浮动链接去掉
+{
+  const LEGACY = '<a href="/" style="position:fixed;bottom:12px;left:12px;z-index:99999;padding:4px 10px;font:13px sans-serif;background:rgba(0,0,0,.65);color:#fff;border-radius:6px;text-decoration:none">← 文章列表</a>';
+  const count = (h) => (h.match(/文章列表/g) || []).length;
+  let out = withTopBackLink('<html><body class="x"><p>hi</p></body></html>');
+  assert.ok(out.startsWith('<html><body class="x"><div') && count(out) === 1, '没有就加在 <body> 后面（顶部）');
+  assert.equal(count(withTopBackLink('<p>no body tag</p>')), 1);
+  assert.equal(count(withTopBackLink('<body><a class="back" href="/">← 文章列表</a><p>x</p></body>')), 1, '页面自己有就不重复');
+  assert.equal(count(withTopBackLink("<body><a href='/'>&larr; 文章列表</a></body>")), 1, '单引号、&larr; 写法也识别');
+  assert.equal(count(withTopBackLink('<body><a href="/other">文章列表</a></body>')), 2, '指向别处的链接不算返回链接');
+  assert.equal(count(withTopBackLink('<body><p>这里提到文章列表但不是链接</p></body>')), 2);
+  out = withTopBackLink(`<html><body>${LEGACY}<p>x</p></body></html>`);
+  assert.ok(!out.includes('position:fixed') && count(out) === 1, '旧的浮动链接被去掉，换成顶部链接');
+  out = withTopBackLink(`<html><body><a class="back" href="/">← 文章列表</a>${LEGACY}</body></html>`);
+  assert.equal(count(out), 1, '页面自己有返回链接时，旧的浮动链接也去掉，且不再加');
+  ok('返回链接：没有就加在顶部；页面自己有就不重复；旧的左下角浮动链接被去掉');
 }
 
 // SSRF 防护：地址分类（不依赖网络）
@@ -526,6 +545,40 @@ ok('大网页：先建占位，后台抓取解析，再 OCR 和翻译');
   ok('SSRF 端到端：重定向到元数据地址被拦；网页里指向内网/非图片的整页图片下载失败而不外传');
 }
 
+// ---- 返回链接（端到端）：保留样式的文章/仅搬运的网页，顶部只有一个返回链接 ----
+{
+  const LEGACY = '<a href="/" style="position:fixed;bottom:12px;left:12px;z-index:99999;padding:4px 10px;font:13px sans-serif;background:rgba(0,0,0,.65);color:#fff;border-radius:6px;text-decoration:none">← 文章列表</a>';
+  const count = (h) => (h.match(/← 文章列表/g) || []).length;
+  // 页面没有返回链接：顶部加一个，没有浮动的
+  let m = await (await post('/api/upload', { filename: 'bl1.html', content: '<html><head><title>BL1</title></head><body><h1>Back link one</h1><p>A paragraph for the back link test number one.</p></body></html>', translate: false })).json();
+  let page = await (await fetch(`${origin}/t/${m.slug}`)).text();
+  assert.equal(count(page), 1);
+  assert.ok(/<body[^>]*><div style="padding:8px 14px[^"]*"><a href="\/"/.test(page), '在 <body> 开头（顶部）');
+  assert.ok(!page.includes('position:fixed;bottom:12px'), '没有左下角浮动链接');
+  // 页面自己已经有返回链接（比如从本站静态文章页翻译出来的版本）：不重复
+  m = await (await post('/api/upload', { filename: 'bl2.html', content: '<html><head><title>BL2</title></head><body><a class="back" href="/">← 文章列表</a><h1>Back link two</h1><p>A paragraph for the back link test number two.</p></body></html>', translate: false })).json();
+  page = await (await fetch(`${origin}/t/${m.slug}`)).text();
+  assert.equal(count(page), 1, '页面自己有就不再加：' + count(page));
+  // 以前保存的网页里带着旧的浮动链接：显示时去掉，不需要重新搬运
+  const stored = await getText(`html/${m.slug}`);
+  await setText(`html/${m.slug}`, stored.replace('<body>', `<body>${LEGACY}`));
+  const mm = await getJSON(`meta/${m.slug}`); mm.updatedAt += 1; await setJSON(`meta/${m.slug}`, mm); // 让渲染缓存失效
+  page = await (await fetch(`${origin}/t/${m.slug}`)).text();
+  assert.ok(!page.includes('position:fixed;bottom:12px') && count(page) === 1, '旧的浮动链接显示时被去掉');
+  // 旧缓存（没有版本前缀）不会被使用
+  await setText(`render/${m.slug}`, `v=${mm.updatedAt}\nOLD_CACHED_PAGE__CSP_NONCE_PLACEHOLDER__`);
+  assert.ok(!(await (await fetch(`${origin}/t/${m.slug}`)).text()).includes('OLD_CACHED_PAGE'), '旧版本的缓存作废');
+  // 仅搬运的网页：同样
+  const raw = await (await post('/api/import', { url: origin + '/sample/en4?raw=1', translate: false })).json();
+  page = await (await fetch(`${origin}/t/${raw.slug}`)).text();
+  assert.equal(count(page), 1);
+  assert.ok(!page.includes('position:fixed'));
+  // 通用排版、文档版式本来就有顶部的返回链接，仍然只有一个
+  const compact = await (await post('/api/upload', { filename: 'bl3.md', content: '# BL3\n\nA paragraph for the compact layout back link test.', translate: false })).json();
+  assert.equal(count(await (await fetch(`${origin}/t/${compact.slug}`)).text()), 1);
+  ok('返回链接：保留样式/仅搬运的网页顶部只有一个，页面自己有就不重复，旧的浮动链接显示时去掉，旧缓存作废');
+}
+
 // ---- 渲染缓存与轻量轮询：“保留原样式”的文章不再每次请求都重新解析整份网页 ----
 {
   const NT = '__CSP_NONCE_PLACEHOLDER__';
@@ -535,9 +588,9 @@ ok('大网页：先建占位，后台抓取解析，再 OCR 和翻译');
   await (await fetch(`${origin}/t/${slug}`)).text(); // 渲染并写入缓存
   const m1 = await getJSON(`meta/${slug}`);
   const cached = await getText(`render/${slug}`);
-  assert.ok(cached && cached.startsWith(`v=${m1.updatedAt}\n`) && cached.includes(NT), '渲染结果已缓存，nonce 用占位符');
+  assert.ok(cached && cached.startsWith(`v2=${m1.updatedAt}\n`) && cached.includes(NT), '渲染结果已缓存，nonce 用占位符');
   // 用哨兵证明缓存真的被使用；每次请求的 nonce 不同，并且被替换进了页面
-  await setText(`render/${slug}`, `v=${m1.updatedAt}\n<html><body>CACHED_SENTINEL<script nonce="${NT}"></script></body></html>`);
+  await setText(`render/${slug}`, `v2=${m1.updatedAt}\n<html><body>CACHED_SENTINEL<script nonce="${NT}"></script></body></html>`);
   const r1 = await fetch(`${origin}/t/${slug}`); const t1 = await r1.text();
   const r2 = await fetch(`${origin}/t/${slug}`); await r2.text();
   assert.ok(t1.includes('CACHED_SENTINEL') && t1.includes(`nonce="${nonceOf(r1)}"`) && !t1.includes(NT));
@@ -546,7 +599,7 @@ ok('大网页：先建占位，后台抓取解析，再 OCR 和翻译');
   m1.updatedAt += 1; await setJSON(`meta/${slug}`, m1);
   const t3 = await (await fetch(`${origin}/t/${slug}`)).text();
   assert.ok(!t3.includes('CACHED_SENTINEL') && t3.includes('class="zh-tr"'));
-  assert.ok((await getText(`render/${slug}`)).startsWith(`v=${m1.updatedAt}\n`));
+  assert.ok((await getText(`render/${slug}`)).startsWith(`v2=${m1.updatedAt}\n`));
   // 翻译进行中的文章不缓存；轮询脚本先查状态接口，只有进度变了才下载整页
   stats.delayMs = 300;
   const hot = await (await post('/api/upload', { filename: 'hot.html', content: '<html><head><title>Hot Styled</title><style>p{color:blue}</style></head><body>' + Array.from({ length: 300 }, (_, i) => `<p>Hot styled paragraph ${i} for the cache test in the page layout.</p>`).join('') + '</body></html>', translate: true })).json();
@@ -560,7 +613,7 @@ ok('大网页：先建占位，后台抓取解析，再 OCR 和翻译');
   // 紧凑排版/文档版式的轮询脚本同样先查状态接口
   assert.ok((await (await fetch(`${origin}/t/${hot.slug}`)).text()).includes('p{color:blue}'));
   await fetch(`${origin}/t/${hot.slug}`);
-  assert.ok((await getText(`render/${hot.slug}`)).startsWith('v='), '完成后才缓存');
+  assert.ok((await getText(`render/${hot.slug}`)).startsWith('v2='), '完成后才缓存');
   assert.equal((await fetch(`${origin}/api/articles/${hot.slug}`, { method: 'DELETE', headers: H })).status, 200);
   assert.equal(await getText(`render/${hot.slug}`), null, '删除文章时一并清掉缓存');
   ok('渲染缓存：完成后缓存、nonce 每次不同、updatedAt 变化即失效、翻译中不缓存、删除时清理；轮询先查状态接口');

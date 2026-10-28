@@ -245,10 +245,6 @@ export function decodeBody(buf, contentType = '') {
   }
 }
 
-export const BACK_LINK =
-  '<a href="/" style="position:fixed;bottom:12px;left:12px;z-index:99999;padding:4px 10px;font:13px sans-serif;' +
-  'background:rgba(0,0,0,.65);color:#fff;border-radius:6px;text-decoration:none">← 文章列表</a>';
-
 // “仅搬运”模式：保留原网页样式，去掉脚本，并用 <base> 让相对路径的图片/样式继续指向原站
 export function sanitizeRawHtml(html, sourceUrl) {
   const $ = cheerio.load(html);
@@ -266,6 +262,5 @@ export function sanitizeRawHtml(html, sourceUrl) {
     existing.remove();
   }
   if (baseHref) $('head').prepend(`<base href="${baseHref.replace(/"/g, '&quot;')}">`);
-  $('body').prepend(BACK_LINK);
   return $.html();
 }

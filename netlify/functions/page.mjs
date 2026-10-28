@@ -6,6 +6,7 @@
 import { randomBytes } from 'node:crypto';
 import { getJSON, getText, setText } from './lib/store.mjs';
 import { renderPage, renderStyledPage, renderDocPage, docView, esc } from './lib/render.mjs';
+import { withTopBackLink } from './lib/backlink.mjs';
 import { validSlug } from './lib/parse.mjs';
 
 // 超过 4MB 的页面用流式响应输出（Netlify 普通响应上限 6MB，流式可到 20MB）
@@ -19,6 +20,7 @@ const streamed = (text) => {
   });
 };
 const NONCE_TOKEN = '__CSP_NONCE_PLACEHOLDER__';
+const RENDER_VERSION = 'v2'; // 页面渲染方式变了（如返回链接的位置）就改这个值，让旧缓存失效
 const html = (body, status, headers = {}) =>
   new Response(typeof body === 'string' && body.length > 4 * 1024 * 1024 ? streamed(body) : body, {
     status,
@@ -39,7 +41,7 @@ export default async (req) => {
   if (meta.kind === 'raw') {
     const page = await getText(`html/${slug}`);
     if (page == null) return notFound();
-    return html(page, 200, { 'content-security-policy': "script-src 'none'; object-src 'none'" });
+    return html(withTopBackLink(page), 200, { 'content-security-policy': "script-src 'none'; object-src 'none'" });
   }
 
   const nonce = randomBytes(12).toString('base64');
@@ -53,7 +55,7 @@ export default async (req) => {
   if (meta.layout === 'page' && !active) {
     const cached = await getText(cacheKey);
     const nl = cached ? cached.indexOf('\n') : -1;
-    if (nl > 0 && cached.slice(0, nl) === `v=${meta.updatedAt}`) {
+    if (nl > 0 && cached.slice(0, nl) === `${RENDER_VERSION}=${meta.updatedAt}`) {
       return html(cached.slice(nl + 1).replaceAll(NONCE_TOKEN, nonce), 200, styledHeaders);
     }
   }
@@ -75,7 +77,7 @@ export default async (req) => {
     const original = await getText(`html/${slug}`);
     if (original == null) return notFound();
     const out = renderStyledPage(meta, doc, original, NONCE_TOKEN);
-    if (!active) await setText(cacheKey, `v=${meta.updatedAt}\n${out}`);
+    if (!active) await setText(cacheKey, `${RENDER_VERSION}=${meta.updatedAt}\n${out}`);
     return html(out.replaceAll(NONCE_TOKEN, nonce), 200, styledHeaders);
   }
   const pageNo = Number(new URL(req.url).searchParams.get('p')) || 1;

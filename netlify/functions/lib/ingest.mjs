@@ -2,7 +2,7 @@
 import { getJSON, setJSON, setText, delPrefix, listMeta } from './store.mjs';
 import { kick } from './kick.mjs';
 import {
-  parseHtml, analyze, contentHash, makeSlug, decodeBody, sanitizeRawHtml, BACK_LINK,
+  parseHtml, analyze, contentHash, makeSlug, decodeBody, sanitizeRawHtml,
 } from './parse.mjs';
 import { looksPositioned, parsePositioned } from './positioned.mjs';
 import { config as translateConfig, autoTranslateMaxChars, pendingChars } from './translate.mjs';
@@ -174,13 +174,13 @@ export async function ingestHtml({ origin, html, finalUrl, title, translate, slu
   }
 }
 
-// 大网页的轻量清理：不用 DOM 解析（十几 MB 的网页会占用太多内存），只去掉脚本、加 <base> 和返回链接。
+// 大网页的轻量清理：不用 DOM 解析（十几 MB 的网页会占用太多内存），只去掉脚本、加 <base>。返回链接在显示时再加。
 // 页面输出时还带 CSP: script-src 'none'，脚本本来也执行不了。
 export function lightSanitize(html, sourceUrl) {
   let out = html.replace(/<script\b[\s\S]*?<\/script\s*>/gi, '');
   const base = `<base href="${String(sourceUrl).replace(/"/g, '&quot;')}">`;
   out = /<head[^>]*>/i.test(out) ? out.replace(/<head[^>]*>/i, (m) => m + base) : base + out;
-  return /<body[^>]*>/i.test(out) ? out.replace(/<body[^>]*>/i, (m) => m + BACK_LINK) : BACK_LINK + out;
+  return out;
 }
 
 const decodeEntities = (t) => t.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
