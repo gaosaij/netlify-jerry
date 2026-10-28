@@ -4,10 +4,10 @@
 // 这里用流式解析（htmlparser2，省内存，十几 MB 的网页也能处理）读出每行的位置和字号，
 // 再用和 PDF 共用的算法还原成段落，并把图片按页放回去。
 import { Parser } from 'htmlparser2';
-import { createRequire } from 'node:module';
 import { mkBlock, cssLength, isPageImage, absoluteHttpUrl } from './parse.mjs';
+import layout from './pdf-layout.cjs'; // 必须用静态 import，Netlify 打包函数时才会把它带进去
 
-const { buildBlocks } = createRequire(import.meta.url)('./pdf-layout.cjs');
+const { buildBlocks } = layout;
 
 // 有的网页为了加粗会把同一行文字叠两层，提取出来整段重复了一遍（"X X"）：只留一份
 const undouble = (t) => { const m = t.match(/^(.{3,}?)\s+\1$/s); return m ? m[1] : t; };
