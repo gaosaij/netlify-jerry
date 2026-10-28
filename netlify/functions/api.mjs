@@ -108,9 +108,28 @@ async function route(req, path) {
     return json(publicMeta(meta), 201);
   }
 
+  // 浏览器拆出来的内联图片/字体：每个资源可分多块（每块 ≤4MB），存成 pdf/<id>/asset/<名字>/<n>
+  if (req.method === 'POST' && a === 'upload' && slug === 'asset') {
+    const q = new URL(req.url).searchParams;
+    const id = q.get('id') || '';
+    const name = q.get('name') || '';
+    const n = Number(q.get('n'));
+    if (!/^[a-z0-9-]{8,64}$/.test(id) || !/^d\d{1,5}\.[a-z0-9]{2,5}$/.test(name) || !Number.isInteger(n) || n < 0 || n >= 40) {
+      return json({ error: '资源参数不正确' }, 400);
+    }
+    const data = Buffer.from(await req.arrayBuffer());
+    if (!data.length) return json({ error: '资源为空' }, 400);
+    await setBinary(`pdf/${id}/asset/${name}/${n}`, data);
+    return json({ ok: true });
+  }
+
   if (req.method === 'POST' && a === 'upload' && slug === 'start') {
     // 大 HTML（如 SingleFile 保存的网页）：分块传完后建一个占位，交给后台函数拼接、拆出内联图片、解析、翻译
-    const { uploadId = '', chunks = 0, filename = 'page.html', title = '', translate = true } = await req.json();
+    const { uploadId = '', chunks = 0, filename = 'page.html', title = '', translate = true, assets = [] } = await req.json();
+    // assets：浏览器已经拆出并单独上传的图片/字体清单 [{ name, parts }]
+    const okAssets = Array.isArray(assets) && assets.length <= 1500 &&
+      assets.every((x) => x && /^d\d{1,5}\.[a-z0-9]{2,5}$/.test(x.name) && Number.isInteger(x.parts) && x.parts >= 1 && x.parts <= 40);
+    if (!okAssets) return json({ error: '资源清单不正确' }, 400);
     if (!/^[a-z0-9-]{8,64}$/.test(uploadId) || !Number.isInteger(chunks) || chunks < 1 || chunks > Math.ceil(MAX_UPLOAD_HTML_BYTES / (4 * 1024 * 1024))) {
       return json({ error: `参数不正确，或文件超过 ${Math.round(MAX_UPLOAD_HTML_BYTES / 1048576)}MB` }, 400);
     }
@@ -120,7 +139,7 @@ async function route(req, path) {
     const meta = {
       slug: makeSlug(title.trim() || name), kind: 'bilingual', source: 'upload', title: title.trim() || name,
       status: 'importing', total: 0, done: 0, createdAt: now, updatedAt: now,
-      ingest: { mode: 'upload', uploadId, chunks, filename, translate, title },
+      ingest: { mode: 'upload', uploadId, chunks, filename, translate, title, assets },
     };
     await setJSON(`doc/${meta.slug}`, { blocks: [] });
     await setJSON(`meta/${meta.slug}`, meta);

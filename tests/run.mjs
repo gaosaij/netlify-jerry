@@ -10,10 +10,11 @@ import { makePdf, samplePages } from './make-pdf.mjs';
 import { samplePositionedHtml } from './make-positioned.mjs';
 import { looksPositioned, parsePositioned } from '../netlify/functions/lib/positioned.mjs';
 import { blockedHint } from '../netlify/functions/lib/ingest.mjs';
-import { externalizeDataUris, singleFileUrl } from '../netlify/functions/lib/assets.mjs';
-import { getJSON, getText } from '../netlify/functions/lib/store.mjs';
+import { externalizeDataUris, singleFileUrl, hasBigDataUri } from '../netlify/functions/lib/assets.mjs';
+import { getJSON, getText, getBinary } from '../netlify/functions/lib/store.mjs';
 import { randomBytes } from 'node:crypto';
 const { buildBlocks } = createRequire(import.meta.url)('../netlify/functions/lib/pdf-layout.cjs');
+const { extractDataUris, b64ToBytes } = createRequire(import.meta.url)('../admin/extract-assets.js');
 
 let passed = 0;
 const ok = (name) => { passed++; console.log('  ✓', name); };
@@ -511,6 +512,79 @@ ok('大网页：先建占位，后台抓取解析，再 OCR 和翻译');
   assert.equal((await fetch(base + 'd1.png')).status, 404);
   assert.equal((await fetch(`${origin}/api/articles/${dup2.slug}`, { method: 'DELETE', headers: H })).status, 200);
   ok('大 HTML 分块上传：拼接、拆出内联图片/字体（去重）、样式保留、译文插入、来源网址、重复识别、清理');
+}
+
+// ---- 超长 base64（几 MB 的单张图）：线性扫描，不能再栈溢出；服务器与浏览器两份实现结果一致 ----
+{
+  const huge = randomBytes(9 * 1024 * 1024).toString('base64'); // 约 12MB 的 base64
+  const src = `<p>x</p><img src="data:image/png;base64,${huge}"><div style="background:url(data:image/jpeg;base64,${huge.slice(0, 4000)})"></div><img src="data:image/gif;base64,AAAA"><img src="data:text/html;base64,${huge.slice(0, 3000)}">`;
+  assert.ok(hasBigDataUri(src));
+  const client = extractDataUris(src);
+  assert.equal(client.assets.length, 2, '12MB 的 png 和 3KB 的 jpeg；小 gif 和非图片类型不拆');
+  assert.ok(client.html.includes('__ASSET__/d0.png') && client.html.includes('__ASSET__/d1.jpg') && client.html.includes('data:image/gif;base64,AAAA') && client.html.includes('data:text/html;base64,'));
+  // 服务器端的结果应该和浏览器端一致（只是占位换成了真实地址）
+  const server = await externalizeDataUris(src, 'slug-x', 'https://o.example');
+  assert.equal(server.count, 2);
+  assert.equal(server.html, client.html.replace(/__ASSET__\//g, 'https://o.example/api/img/slug-x/'));
+  assert.ok((await getBinary('img/slug-x/d0.png')).length === 9 * 1024 * 1024);
+  ok('超长 base64（12MB）不再栈溢出，服务器端与浏览器端的拆分结果一致');
+}
+
+// ---- 超大 HTML（几百 MB）：浏览器端拆出图片/字体，逐个（分块）上传，再上传精简后的网页 ----
+{
+  const font = randomBytes(30000), big = randomBytes(5 * 1024 * 1024), img2 = randomBytes(900000);
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Huge SingleFile Page</title><style>@font-face{font-family:H;src:url(data:font/woff2;base64,${font.toString('base64')}) format('woff2')}body{font-family:H,serif}</style></head><body><p>First English paragraph of the huge page for translation.</p><img src="data:image/png;base64,${big.toString('base64')}" alt="big"><p>Another English paragraph about the huge page.</p><img src="data:image/jpeg;base64,${img2.toString('base64')}" alt="small"><img src="data:image/png;base64,${big.toString('base64')}" alt="dup"></body></html>`;
+  // 1) 浏览器端拆分
+  const { html: slim, assets } = extractDataUris(html);
+  assert.equal(assets.length, 3, '字体 + 大图 + 小图，重复的大图只算一份');
+  assert.ok(slim.length < 3000 && !slim.includes('base64,') && slim.includes('__ASSET__/d1.png'), '精简后的网页很小：' + slim.length);
+  assert.ok(Buffer.from(b64ToBytes(assets[1].b64)).equals(big));
+  const id = 'upload-huge0001';
+  const H0 = { 'x-admin-password': 'test-pass' };
+  // 2) 逐个上传资源（5MB 的大图分成 2 块）
+  const manifest = [];
+  for (const a of assets) {
+    const bytes = b64ToBytes(a.b64);
+    const parts = Math.max(1, Math.ceil(bytes.length / (4 * 1024 * 1024)));
+    for (let p = 0; p < parts; p++) {
+      const r = await fetch(`${origin}/api/upload/asset?id=${id}&name=${a.name}&n=${p}`, { method: 'POST', headers: H0, body: bytes.subarray(p * 4 * 1024 * 1024, (p + 1) * 4 * 1024 * 1024) });
+      assert.equal(r.status, 200);
+    }
+    manifest.push({ name: a.name, parts });
+  }
+  assert.deepEqual(manifest.map((m) => m.parts), [1, 2, 1]);
+  assert.equal((await fetch(`${origin}/api/upload/asset?id=${id}&name=evil.png&n=0`, { method: 'POST', headers: H0, body: 'x' })).status, 400, '资源名必须是 d数字.扩展名');
+  // 3) 上传精简后的网页
+  assert.equal((await fetch(`${origin}/api/upload/chunk?id=${id}&n=0`, { method: 'POST', headers: H0, body: Buffer.from(slim) })).status, 200);
+  assert.equal((await post('/api/upload/start', { uploadId: id, chunks: 1, filename: 'x.html', assets: [{ name: '../x', parts: 1 }] })).status, 400, '非法清单被拒绝');
+  process.env.MINERU_API_TOKEN = '';
+  res = await post('/api/upload/start', { uploadId: id, chunks: 1, filename: 'Huge.html', translate: true, assets: manifest });
+  assert.equal(res.status, 201, await res.clone().text());
+  meta = await waitDone((await res.json()).slug);
+  process.env.MINERU_API_TOKEN = tokenBackup;
+  assert.equal(meta.status, 'done', JSON.stringify(meta));
+  const hugePage = await (await fetch(`${origin}/t/${meta.slug}`)).text();
+  const hb = `${origin}/api/img/${meta.slug}/`;
+  assert.ok(hugePage.includes(`url(${hb}d0.woff2)`) && hugePage.includes(`${hb}d1.png`) && hugePage.includes(`${hb}d2.jpg`) && !hugePage.includes('__ASSET__'), '占位地址已换成本站地址');
+  assert.ok(hugePage.includes('[ZH] First English paragraph'), '译文已插入');
+  for (const [name, bytes] of [['d0.woff2', font], ['d1.png', big], ['d2.jpg', img2]]) {
+    const r = await fetch(hb + name);
+    assert.ok(Buffer.from(await r.arrayBuffer()).equals(bytes), name + ' 内容与原文件一致（含分块拼接的 5MB 大图）');
+  }
+  assert.ok(fs.readdirSync(process.env.LOCAL_STORE_DIR).every((f) => !f.startsWith('pdf%2Fupload-huge0001')), '上传的分块和资源分块都已清理');
+
+  // 资源缺块：报错，并且不留下孤立的图片
+  const id2 = 'upload-huge0002';
+  await fetch(`${origin}/api/upload/chunk?id=${id2}&n=0`, { method: 'POST', headers: H0, body: Buffer.from(slim.replace('Huge SingleFile Page', 'Huge Missing Page')) });
+  await fetch(`${origin}/api/upload/asset?id=${id2}&name=d0.woff2&n=0`, { method: 'POST', headers: H0, body: font });
+  const bad = await (await post('/api/upload/start', { uploadId: id2, chunks: 1, filename: 'missing.html', translate: false, assets: [{ name: 'd0.woff2', parts: 1 }, { name: 'd1.png', parts: 2 }] })).json();
+  const badDone = await waitDone(bad.slug);
+  assert.equal(badDone.status, 'error');
+  assert.ok(badDone.error.includes('d1.png') && badDone.error.includes('缺少'), badDone.error);
+  assert.ok(fs.readdirSync(process.env.LOCAL_STORE_DIR).every((f) => !f.startsWith(`img%2F${bad.slug}`)), '失败时不留孤立图片');
+  assert.equal((await fetch(`${origin}/api/articles/${bad.slug}`, { method: 'DELETE', headers: H })).status, 200);
+  assert.equal((await fetch(`${origin}/api/articles/${meta.slug}`, { method: 'DELETE', headers: H })).status, 200);
+  ok('超大 HTML：浏览器端拆出图片/字体、5MB 大图分块上传、重复图片去重、占位替换、缺块报错并清理');
 }
 
 // SEC 式限制：没有联系方式的 User-Agent 被拒；设置 FETCH_USER_AGENT 后可以

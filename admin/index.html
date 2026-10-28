@@ -82,7 +82,7 @@
 
     <section>
       <h2>上传英文文章（.html / .md / .txt / .pdf，或直接粘贴文本）</h2>
-      <div class="cfg">SingleFile 保存的网页（.html，图片已内联）也可以直接上传，最大 80MB；超过 3MB 会自动分块上传，图片、字体会拆出来单独保存。</div>
+      <div class="cfg">SingleFile 保存的网页（.html，图片已内联）也可以直接上传，最大 450MB。超过 3MB 时，浏览器会先把内联的图片、字体拆出来逐个上传，再上传精简后的网页（大文件读取和拆分需要几十秒，请不要关闭页面）。</div>
       <label for="file">选择文件</label>
       <input type="file" id="file" accept=".html,.htm,.md,.markdown,.txt,.pdf"> <!-- PDF：accept 里的 .pdf -->
       <label for="text">或粘贴文章文本</label>
@@ -302,8 +302,9 @@ async function countPages(file) {
   } catch { return 0; }
 }
 // 把 PDF 按 4MB 分块传给服务器（Netlify 单次请求上限 6MB），再由后台交给 MinerU
-async function uploadChunks(file, label, maxMb) {
-  const id = 'upload-' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+const newUploadId = () => 'upload-' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+async function uploadChunks(file, label, maxMb, existingId) {
+  const id = existingId || newUploadId();
   const size = 4 * 1024 * 1024;
   const chunks = Math.max(1, Math.ceil(file.size / size));
   if (file.size > maxMb * 1024 * 1024) throw new Error(label + '超过 ' + maxMb + 'MB，无法处理');
@@ -317,6 +318,39 @@ async function uploadChunks(file, label, maxMb) {
   return { id, chunks };
 }
 const uploadPdfChunks = (file) => uploadChunks(file, ' PDF', 200);
+
+// 大 HTML（如 SingleFile 保存的网页，图片以 base64 内联，常有几十到几百 MB）：
+// 在浏览器里把内联的图片、字体拆出来逐个上传，最后只上传拆完后几 MB 的 HTML，文件大小不再受服务器内存限制。
+const BIG_HTML_MAX_MB = 450;
+async function uploadBigHtml(file, translate, title) {
+  if (file.size > BIG_HTML_MAX_MB * 1024 * 1024) throw new Error('网页超过 ' + BIG_HTML_MAX_MB + 'MB，无法处理');
+  if (!window.ExtractAssets) await loadScript('/admin/extract-assets.js');
+  const id = newUploadId();
+  say('uploadMsg', '正在读取文件…（大文件需要几十秒，请不要关闭页面）');
+  let text = await file.text();
+  say('uploadMsg', '正在拆出内联的图片和字体…');
+  const { html, assets } = window.ExtractAssets.extractDataUris(text);
+  text = null; // 释放内存
+  const size = 4 * 1024 * 1024;
+  const manifest = [];
+  for (let i = 0; i < assets.length; i++) {
+    const bytes = window.ExtractAssets.b64ToBytes(assets[i].b64);
+    assets[i].b64 = null;
+    const parts = Math.max(1, Math.ceil(bytes.length / size));
+    for (let p = 0; p < parts; p++) {
+      say('uploadMsg', '正在上传图片和字体：' + (i + 1) + ' / ' + assets.length);
+      const res = await fetch('/api/upload/asset?id=' + id + '&name=' + assets[i].name + '&n=' + p, {
+        method: 'POST', headers: { 'x-admin-password': getPwd() }, body: bytes.subarray(p * size, (p + 1) * size),
+      });
+      if (!res.ok) throw new Error(((await res.json().catch(() => ({}))).error) || ('上传图片失败 ' + res.status));
+    }
+    manifest.push({ name: assets[i].name, parts });
+  }
+  const up = await uploadChunks(new Blob([html], { type: 'text/html' }), '网页', 80, id);
+  return api('upload/start', { method: 'POST', body: JSON.stringify({
+    uploadId: up.id, chunks: up.chunks, filename: file.name, title, translate, assets: manifest,
+  }) });
+}
 async function extractPdf(file) {
   await loadPdfJs();
   if (!window.PdfLayout) await loadScript('/admin/pdf-layout.js');
@@ -340,11 +374,8 @@ $('uploadBtn').onclick = async () => {
   try {
     const payload = { filename: f ? f.name : 'pasted.txt', title: $('title').value, translate: $('autoTr').checked };
     if (f && /\.html?$/i.test(f.name) && f.size > 3 * 1024 * 1024) {
-      // 大 HTML（如 SingleFile 保存的网页，图片已内联）：分块上传，后台拆出图片、解析、翻译
-      const up = await uploadChunks(f, '网页', 80);
-      const m = await api('upload/start', { method: 'POST', body: JSON.stringify({
-        uploadId: up.id, chunks: up.chunks, filename: f.name, title: $('title').value, translate: $('autoTr').checked,
-      }) });
+      // 大 HTML（如 SingleFile 保存的网页）：浏览器拆出图片和字体逐个上传，后台再解析、翻译
+      const m = await uploadBigHtml(f, $('autoTr').checked, $('title').value);
       resultMsg('uploadMsg', m, $('autoTr').checked);
       $('file').value = ''; $('title').value = '';
       $('uploadBtn').disabled = false;
