@@ -6,6 +6,7 @@
   },
   "articles/HOW PEOPLE USE CHATGPT-zh-CN-dual.html": {
     "title": "How People Use ChatGPT（中英对照）",
-    "desc": "双语对照阅读版本"
+    "desc": "双语对照阅读版本",
+    "translate": false
   }
 }

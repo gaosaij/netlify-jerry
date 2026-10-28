@@ -84,5 +84,40 @@
 <!--ARTICLES-->
     </ul>
   </main>
+<script>
+// 读取通过管理页上传/搬运的文章，插入到置顶项之后（读取失败就只显示上面的静态列表）
+(function () {
+  var STATUS = { importing: '正在抓取解析', ocr: 'OCR 识别中', idle: '尚未翻译', queued: '排队翻译中', translating: '翻译中', error: '翻译中断，可到管理页继续' };
+  fetch('/api/articles', { cache: 'no-store' })
+    .then(function (r) { return r.ok ? r.json() : []; })
+    .then(function (list) {
+      var ul = document.querySelector('ul');
+      var empty = ul.querySelector('.empty');
+      if (empty && list.length) empty.remove();
+      var pinned = ul.querySelectorAll('li[data-pinned]');
+      var anchor = pinned.length ? pinned[pinned.length - 1].nextSibling : ul.firstChild;
+      list.forEach(function (m) {
+        // 站内静态文章已经有对照版时，隐藏英文原版，只显示对照版
+        if (m.origPath) {
+          ul.querySelectorAll('a.article').forEach(function (x) {
+            if (x.getAttribute('href') === m.origPath) x.parentNode.remove();
+          });
+        }
+        var desc = m.kind === 'raw' ? '搬运的网页'
+          : m.status === 'done' ? '中英对照'
+          : m.status === 'skip' ? '原文已有中文'
+          : (STATUS[m.status] || '') + (m.total ? '：' + Math.min(m.done, m.total) + ' / ' + m.total + ' 段' : '');
+        var li = document.createElement('li');
+        var a = document.createElement('a');
+        a.className = 'article'; a.href = '/t/' + m.slug;
+        var t = document.createElement('div'); t.className = 'title'; t.textContent = m.title;
+        var d = document.createElement('div'); d.className = 'desc'; d.textContent = desc;
+        a.append(t, d); li.append(a);
+        ul.insertBefore(li, anchor);
+      });
+    })
+    .catch(function () {});
+})();
+</script>
 </body>
 </html>

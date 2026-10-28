@@ -1,3 +1,8 @@
 [build]
   command = "node build.js"
   publish = "dist"
+
+# 云函数：上传/搬运接口、中英对照页面、后台分块翻译
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"

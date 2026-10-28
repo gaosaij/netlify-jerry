@@ -17,7 +17,10 @@ const SKIP = new Set([
   '.git', '.github', '.netlify', '.claude', '.DS_Store', 'node_modules', 'dist',
   'netlify-deploy', 'build.js', 'netlify.toml', 'articles.json', 'index.template.html', 'article.template.html',
   'package.json', 'package-lock.json', 'README.md',
+  'netlify', 'tests', 'node_modules',
 ]);
+// 不出现在首页列表、但仍需要发布的目录（管理页）
+const HIDDEN = new Set(['admin']);
 
 const meta = fs.existsSync(path.join(ROOT, 'articles.json'))
   ? JSON.parse(fs.readFileSync(path.join(ROOT, 'articles.json'), 'utf8'))
@@ -61,7 +64,7 @@ function scan(base) {
   if (!fs.existsSync(dir)) return;
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
     if (e.name.startsWith('.')) continue;
-    if (!base && (SKIP.has(e.name) || e.name === ARTICLES_DIR)) continue;
+    if (!base && (SKIP.has(e.name) || HIDDEN.has(e.name) || e.name === ARTICLES_DIR)) continue;
     const prefix = base ? `${base}/` : '';
     let rel, href, kind;
     if (e.isFile() && /\.html$/i.test(e.name) && e.name !== 'index.html') {
@@ -76,6 +79,7 @@ function scan(base) {
       title: titleFor(rel, kind, e.name),
       desc: (meta[rel] && meta[rel].desc) || '',
       pinned: !!(meta[rel] && meta[rel].pin),
+      translate: !(meta[rel] && meta[rel].translate === false),
       added: addedTime(rel),
     });
   }
@@ -87,7 +91,7 @@ scan(ARTICLES_DIR);
 const rank = (a) => (metaOrder.includes(a.rel) ? metaOrder.indexOf(a.rel) + 1 : -1);
 articles.sort((a, b) => b.pinned - a.pinned || b.added - a.added || rank(a) - rank(b) || a.title.localeCompare(b.title, 'zh'));
 
-const items = articles.map((a) => `      <li>
+const items = articles.map((a) => `      <li${a.pinned ? ' data-pinned' : ''}>
         <a class="article" href="${escapeHtml(a.href)}">
           <div class="title">${escapeHtml(a.title)}</div>${a.desc ? `
           <div class="desc">${escapeHtml(a.desc)}</div>` : ''}
@@ -101,6 +105,9 @@ for (const e of fs.readdirSync(ROOT)) {
   fs.cpSync(path.join(ROOT, e), path.join(OUT, e), { recursive: true, filter: (src) => !/\.md$/i.test(src) });
 }
 
+// 浏览器端 PDF 提取要用的段落还原算法，和云函数共用同一份源码
+fs.copyFileSync(path.join(ROOT, 'netlify/functions/lib/pdf-layout.cjs'), path.join(OUT, 'admin/pdf-layout.js'));
+
 const articleTemplate = fs.readFileSync(path.join(ROOT, 'article.template.html'), 'utf8');
 for (const a of articles.filter((x) => x.kind === 'md')) {
   const body = marked.parse(fs.readFileSync(path.join(ROOT, a.rel), 'utf8'), { gfm: true })
@@ -113,5 +120,9 @@ for (const a of articles.filter((x) => x.kind === 'md')) {
 
 const template = fs.readFileSync(path.join(ROOT, 'index.template.html'), 'utf8');
 fs.writeFileSync(path.join(OUT, 'index.html'), template.replace('<!--ARTICLES-->', items));
+// 站内文章清单（只含 articles/ 下的文章），管理页据此一键翻译；articles.json 里写 "translate": false 的不翻译
+const index = articles.filter((a) => a.rel.startsWith(`${ARTICLES_DIR}/`))
+  .map((a) => ({ title: a.title, href: a.href, translate: a.translate }));
+fs.writeFileSync(path.join(OUT, 'articles-index.json'), JSON.stringify(index));
 console.log(`生成首页：${articles.length} 篇文章`);
 articles.forEach((a) => console.log(`  - ${a.title}  ->  ${a.href}`));

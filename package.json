@@ -1,5 +1,12 @@
 {
+  "scripts": {
+    "test": "node tests/run.mjs"
+  },
   "dependencies": {
+    "@netlify/blobs": "^8.1.0",
+    "cheerio": "^1.0.0",
+    "fflate": "^0.8.2",
+    "htmlparser2": "^9.1.0",
     "marked": "^18.0.14"
   }
 }

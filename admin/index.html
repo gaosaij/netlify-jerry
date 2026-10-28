@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex">
+<title>文章管理</title>
+<style>
+  :root { --bg:#fff; --fg:#1a1a1a; --muted:#666; --border:#e5e5e5; --accent:#007bff; --card-bg:#fafafa; --err:#d33; --ok:#1a8f4c; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#14161a; --fg:#e8e8e8; --muted:#9a9a9a; --border:#2a2d33; --accent:#4c9aff; --card-bg:#1b1e24; --err:#ff7b7b; --ok:#4cc38a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); line-height:1.5;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,"PingFang SC","Microsoft YaHei",sans-serif; }
+  main { max-width:720px; margin:0 auto; padding:40px 20px 80px; }
+  h1 { font-size:22px; margin:0 0 6px; }
+  h2 { font-size:16px; margin:0 0 12px; }
+  .sub { color:var(--muted); font-size:13px; margin-bottom:24px; }
+  .sub a { color:var(--muted); }
+  section { background:var(--card-bg); border:1px solid var(--border); border-radius:10px; padding:16px 18px; margin-bottom:16px; }
+  label { display:block; font-size:13px; color:var(--muted); margin:10px 0 4px; }
+  input[type=text], input[type=password], input[type=url], textarea {
+    width:100%; padding:8px 10px; font:inherit; font-size:14px; color:var(--fg); background:var(--bg);
+    border:1px solid var(--border); border-radius:6px; }
+  textarea { min-height:110px; resize:vertical; }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:12px; }
+  .check { display:flex; align-items:center; gap:6px; font-size:14px; color:var(--fg); margin:0; }
+  button { font:inherit; font-size:14px; padding:7px 14px; border-radius:6px; border:1px solid var(--accent);
+    background:var(--accent); color:#fff; cursor:pointer; }
+  button.ghost { background:none; color:var(--accent); }
+  button.danger { background:none; color:var(--err); border-color:var(--err); }
+  button:disabled { opacity:.5; cursor:default; }
+  .msg { font-size:13px; margin-top:10px; min-height:1em; }
+  .msg.err { color:var(--err); } .msg.ok { color:var(--ok); }
+  .item { border-top:1px solid var(--border); padding:12px 0; }
+  .item:first-child { border-top:none; padding-top:0; }
+  .item .t { font-weight:600; font-size:15px; }
+  .item .t a { color:inherit; text-decoration:none; } .item .t a:hover { color:var(--accent); }
+  .item .s { font-size:12px; color:var(--muted); margin-top:2px; }
+  .item .s .e { color:var(--err); }
+  .bar { height:5px; background:var(--border); border-radius:3px; margin:8px 0; overflow:hidden; }
+  .bar div { height:100%; background:var(--accent); }
+  .actions { display:flex; gap:8px; margin-top:6px; }
+  .actions button { padding:3px 10px; font-size:12px; }
+  .cfg { font-size:13px; color:var(--muted); }
+  .hide { display:none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>文章管理</h1>
+  <div class="sub"><a href="/">← 文章列表</a>　上传英文文章 / 搬运网页，自动分段翻译成中英对照</div>
+
+  <section id="login">
+    <h2>管理密码</h2>
+    <input type="password" id="pwd" placeholder="Netlify 里设置的 ADMIN_PASSWORD" autocomplete="current-password">
+    <div class="row"><button id="loginBtn">确定</button><span class="cfg" id="cfg"></span></div>
+    <div class="msg" id="loginMsg"></div>
+  </section>
+
+  <div id="tools" class="hide">
+    <section>
+      <h2>搬运网页（填网址，自动抓取并翻译）</h2>
+      <label for="url">文章网址</label>
+      <input type="url" id="url" placeholder="https://example.com/some-article">
+      <div class="row">
+        <label class="check"><input type="radio" name="mode" value="translate" checked> 搬运并翻译（保留原网页样式和图片，一段英文一段中文）</label>
+        <label class="check"><input type="radio" name="mode" value="raw"> 仅搬运（保留原网页样式，不翻译）</label>
+      </div>
+      <div class="cfg" style="margin-top:8px">网页是 PDF 转出来的（逐行排版，如 SEC 备案文件）时，会按位置还原成段落；里面的整页图片会用 MinerU 识别文字（需配置 MINERU_API_TOKEN）。很长的文章不会自动开始翻译，先显示估算，确认后再点“开始翻译”。</div>
+      <div class="row"><button id="importBtn">搬运</button></div>
+      <div class="msg" id="importMsg"></div>
+    </section>
+
+    <section>
+      <h2>站内已有文章</h2>
+      <div id="site"><span class="cfg">加载中…</span></div>
+      <div class="row"><button id="siteAllBtn" class="hide">翻译全部未翻译的</button></div>
+      <div class="msg" id="siteMsg"></div>
+    </section>
+
+    <section>
+      <h2>上传英文文章（.html / .md / .txt / .pdf，或直接粘贴文本）</h2>
+      <label for="file">选择文件</label>
+      <input type="file" id="file" accept=".html,.htm,.md,.markdown,.txt,.pdf"> <!-- PDF：accept 里的 .pdf -->
+      <label for="text">或粘贴文章文本</label>
+      <textarea id="text" placeholder="把英文文章粘贴到这里，段落之间空一行"></textarea>
+      <label for="title">标题（可不填，自动从文章里取）</label>
+      <input type="text" id="title">
+      <div class="row">
+        <label class="check"><input type="checkbox" id="useOcr" disabled> PDF 用 MinerU 识别（扫描版、复杂版面更准，长文自动分段；需要配置 MINERU_API_TOKEN）</label>
+      </div>
+      <div class="row">
+        <label class="check"><input type="checkbox" id="autoTr" checked> 上传后自动翻译</label>
+        <button id="uploadBtn">上传</button>
+      </div>
+      <div class="msg" id="uploadMsg"></div>
+    </section>
+
+    <section>
+      <h2>所有文章</h2>
+      <div id="list"><span class="cfg">加载中…</span></div>
+    </section>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const STATUS = { importing: '正在抓取解析', ocr: 'OCR 识别中', idle: '尚未翻译', queued: '排队中', translating: '翻译中', done: '翻译完成', skip: '已有中文', error: '出错' };
+let timer = null;
+
+const getPwd = () => { try { return localStorage.getItem('adminPwd') || ''; } catch { return ''; } };
+const setPwd = (v) => { try { localStorage.setItem('adminPwd', v); } catch { /* 无痕模式下不记住 */ } };
+
+async function api(path, opts = {}) {
+  const res = await fetch('/api/' + path, {
+    ...opts,
+    headers: { 'content-type': 'application/json', 'x-admin-password': getPwd(), ...(opts.headers || {}) },
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw Object.assign(new Error(data.error || ('请求失败 ' + res.status)), { status: res.status, data });
+  return data;
+}
+
+function say(id, text, kind) { const e = $(id); e.textContent = text; e.className = 'msg ' + (kind || ''); }
+
+async function login() {
+  setPwd($('pwd').value.trim() || getPwd());
+  try {
+    const s = await api('status');
+    $('tools').classList.remove('hide');
+    $('login').classList.add('hide');
+    say('loginMsg', '');
+    $('cfg').textContent = '';
+    renderCfg(s);
+    refresh();
+  } catch (e) {
+    $('login').classList.remove('hide');
+    $('tools').classList.add('hide');
+    say('loginMsg', e.message, 'err');
+  }
+}
+
+function renderCfg(s) {
+  const el = document.createElement('div');
+  el.className = 'cfg';
+  el.textContent = (s.hasKey
+    ? '翻译接口已配置：' + s.model + '（' + s.base + '）'
+    : '⚠ 还没有配置 OPENAI_API_KEY，文章能保存但不能翻译')
+    + (s.hasMineru ? '；PDF 识别（MinerU）已配置' : '；未配置 MINERU_API_TOKEN，PDF 只能在浏览器里提取文字');
+  $('useOcr').disabled = !s.hasMineru;
+  $('useOcr').checked = !!s.hasMineru;
+  const old = document.getElementById('cfgLine');
+  if (old) old.remove();
+  el.id = 'cfgLine';
+  $('tools').prepend(el);
+}
+
+function itemHtml(m) {
+  const pct = m.total ? Math.floor(Math.min(m.done, m.total) / m.total * 100) : 0;
+  const stale = ['translating', 'ocr', 'importing'].includes(m.status) && Date.now() - m.updatedAt > 7 * 60 * 1000;
+  let status = m.kind === 'raw' ? '仅搬运' : (STATUS[m.status] || m.status);
+  if (m.status === 'importing') status += '　大网页在后台抓取解析，可能要几分钟';
+  else if (m.status === 'ocr') status += '　' + (m.ocrDone || 0) + ' / ' + (m.ocrTotal || '?') + ' 页，识别完自动翻译';
+  else if (m.stage === 'ocr' && m.status === 'error') status += '（OCR 阶段）';
+  else if (m.stage === 'import' && m.status === 'error') status += '（抓取阶段）';
+  else if (m.kind === 'bilingual' && m.status !== 'skip' && m.total) status += '　' + m.done + ' / ' + m.total + ' 段（' + pct + '%）';
+  if (stale) status += '（长时间没有进展，可能已中断，点“继续翻译”）';
+  const canTr = m.kind === 'bilingual' && ['idle', 'error'].includes(m.status) || stale;
+  const bar = m.kind === 'bilingual' && !m.stage && ['queued', 'translating', 'error', 'idle'].includes(m.status) && m.total
+    ? '<div class="bar"><div style="width:' + pct + '%"></div></div>' : '';
+  const div = document.createElement('div');
+  div.className = 'item';
+  div.dataset.slug = m.slug;
+  const t = document.createElement('div'); t.className = 't';
+  const a = document.createElement('a'); a.href = '/t/' + m.slug; a.target = '_blank'; a.textContent = m.title;
+  t.append(a);
+  const s = document.createElement('div'); s.className = 's'; s.textContent = status;
+  if (m.error) { const e = document.createElement('div'); e.className = 'e'; e.textContent = m.error; s.append(e); }
+  if (m.note) { const n = document.createElement('div'); n.textContent = m.note; s.append(n); }
+  div.append(t, s);
+  if (bar) div.insertAdjacentHTML('beforeend', bar);
+  const act = document.createElement('div'); act.className = 'actions';
+  if (canTr) {
+    const b = document.createElement('button'); b.className = 'ghost';
+    b.textContent = m.status === 'idle' ? '开始翻译' : m.stage === 'import' ? '重新抓取' : m.stage === 'ocr' ? '继续识别' : '继续翻译';
+    b.onclick = async () => { b.disabled = true; try { await api('articles/' + m.slug + '/translate', { method: 'POST' }); } catch (e) { alert(e.message); } refresh(); };
+    act.append(b);
+  }
+  const d = document.createElement('button'); d.className = 'danger'; d.textContent = '删除';
+  d.onclick = async () => {
+    if (!confirm('确定删除「' + m.title + '」？')) return;
+    try { await api('articles/' + m.slug, { method: 'DELETE' }); } catch (e) { alert(e.message); }
+    refresh();
+  };
+  act.append(d);
+  div.append(act);
+  return div;
+}
+
+async function refresh() {
+  clearTimeout(timer);
+  try {
+    const list = await (await fetch('/api/articles', { cache: 'no-store' })).json();
+    const box = $('list');
+    box.replaceChildren();
+    if (!list.length) box.innerHTML = '<span class="cfg">还没有通过这里上传或搬运的文章</span>';
+    list.forEach((m) => box.append(itemHtml(m)));
+    renderSite(list);
+    // 有文章在翻译时，每 6 秒刷新一次进度
+    if (list.some((m) => ['ocr', 'queued', 'translating'].includes(m.status))) timer = setTimeout(refresh, 6000);
+  } catch (e) { say('loginMsg', e.message, 'err'); }
+}
+
+// ---- 站内已有文章：读取构建时生成的 articles-index.json，一键搬运并翻译 ----
+let siteList = [];
+async function renderSite(articles) {
+  const idx = await fetch('/articles-index.json', { cache: 'no-store' }).then((r) => r.ok ? r.json() : []).catch(() => []);
+  siteList = [];
+  const box = $('site');
+  box.replaceChildren();
+  idx.forEach((a) => {
+    const done = articles.find((m) => m.origPath === decodeURI(a.href) || m.origPath === a.href);
+    const row = document.createElement('div');
+    row.className = 'item';
+    const t = document.createElement('div'); t.className = 't'; t.textContent = a.title;
+    const s2 = document.createElement('div'); s2.className = 's';
+    row.append(t, s2);
+    if (!a.translate) s2.textContent = '无需翻译（已是中英对照）';
+    else if (done) { s2.textContent = '已搬运：' + ({ done: '翻译完成', skip: '原文已有中文' }[done.status] || '翻译中，见下方列表'); }
+    else {
+      s2.textContent = '尚未翻译';
+      siteList.push(a);
+      const b = document.createElement('button'); b.className = 'ghost'; b.textContent = '翻译';
+      b.onclick = () => importSite([a]);
+      const act = document.createElement('div'); act.className = 'actions'; act.append(b); row.append(act);
+    }
+    box.append(row);
+  });
+  if (!idx.length) box.innerHTML = '<span class="cfg">没有读取到站内文章清单（本地预览时没有）</span>';
+  $('siteAllBtn').classList.toggle('hide', siteList.length < 2);
+}
+async function importSite(list) {
+  for (const a of list) {
+    say('siteMsg', '正在提交：' + a.title);
+    try { await api('import', { method: 'POST', body: JSON.stringify({ url: location.origin + a.href, title: a.title, translate: true }) }); }
+    catch (e) { say('siteMsg', a.title + '：' + e.message, 'err'); await refresh(); return; }
+  }
+  say('siteMsg', '已提交，后台正在翻译，进度见下方“所有文章”', 'ok');
+  refresh();
+}
+$('siteAllBtn').onclick = () => importSite(siteList);
+
+function resultMsg(id, m, translating) {
+  say(id, translating && ['queued', 'ocr', 'importing'].includes(m.status) ? '已提交，后台正在翻译：' + m.title : '已保存：' + m.title + (m.note ? '（' + m.note + '）' : ''), 'ok');
+}
+
+$('loginBtn').onclick = login;
+$('pwd').addEventListener('keydown', (e) => { if (e.key === 'Enter') login(); });
+
+$('importBtn').onclick = async () => {
+  const url = $('url').value.trim();
+  if (!url) return say('importMsg', '请先填网址', 'err');
+  const translate = document.querySelector('input[name=mode]:checked').value === 'translate';
+  $('importBtn').disabled = true;
+  say('importMsg', '正在抓取网页…');
+  try {
+    const m = await api('import', { method: 'POST', body: JSON.stringify({ url, translate }) });
+    resultMsg('importMsg', m, translate);
+    $('url').value = '';
+  } catch (e) {
+    say('importMsg', e.message + (e.data && e.data.slug ? '（已有同一篇，可直接在下面的列表里查看）' : ''), 'err');
+  }
+  $('importBtn').disabled = false;
+  refresh();
+};
+
+// ---- PDF 支持（需要时才加载 pdf.js）----
+const PDFJS = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/';
+function loadScript(src) {
+  return new Promise((ok, fail) => {
+    const el = document.createElement('script');
+    el.src = src; el.onload = ok; el.onerror = () => fail(new Error('加载 PDF 组件失败：' + src));
+    document.head.append(el);
+  });
+}
+async function loadPdfJs() {
+  if (window.pdfjsLib) return;
+  say('uploadMsg', '正在加载 PDF 组件…');
+  await loadScript(PDFJS + 'pdf.min.js');
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS + 'pdf.worker.min.js';
+}
+// MinerU 单次最多处理 200 页，需要先知道总页数才能拆段；读不出来就不拆（超限时 MinerU 会报错）
+async function countPages(file) {
+  try {
+    await loadPdfJs();
+    return (await window.pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise).numPages;
+  } catch { return 0; }
+}
+// 把 PDF 按 4MB 分块传给服务器（Netlify 单次请求上限 6MB），再由后台交给 MinerU
+async function uploadPdfChunks(file) {
+  const id = 'upload-' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+  const size = 4 * 1024 * 1024;
+  const chunks = Math.max(1, Math.ceil(file.size / size));
+  if (chunks > 50) throw new Error('PDF 超过 200MB，MinerU 无法处理');
+  for (let i = 0; i < chunks; i++) {
+    say('uploadMsg', '正在上传 PDF：' + (i + 1) + ' / ' + chunks);
+    const res = await fetch('/api/ocr/chunk?id=' + id + '&n=' + i, {
+      method: 'POST', headers: { 'x-admin-password': getPwd() }, body: file.slice(i * size, (i + 1) * size),
+    });
+    if (!res.ok) throw new Error(((await res.json().catch(() => ({}))).error) || ('上传失败 ' + res.status));
+  }
+  return { id, chunks };
+}
+async function extractPdf(file) {
+  await loadPdfJs();
+  if (!window.PdfLayout) await loadScript('/admin/pdf-layout.js');
+  if (!window.PdfExtract) await loadScript('/admin/pdf-extract.js');
+  const res = await window.PdfExtract.extract(window.pdfjsLib, await file.arrayBuffer(), (n, total) => say('uploadMsg', '正在提取 PDF 文字：' + n + ' / ' + total + ' 页'));
+  if (res.blocks.length < 3) throw new Error('没有从 PDF 里提取到文字（可能是扫描版图片 PDF）');
+  return res;
+}
+
+$('file').onchange = async () => {
+  const f = $('file').files[0];
+  if (f && !$('title').value) $('title').placeholder = f.name;
+};
+
+$('uploadBtn').onclick = async () => {
+  const f = $('file').files[0];
+  const pasted = $('text').value;
+  if (!f && !pasted.trim()) return say('uploadMsg', '请选择文件或粘贴文本', 'err');
+  $('uploadBtn').disabled = true;
+  say('uploadMsg', '正在上传…');
+  try {
+    const payload = { filename: f ? f.name : 'pasted.txt', title: $('title').value, translate: $('autoTr').checked };
+    if (f && /\.pdf$/i.test(f.name) && $('useOcr').checked) {
+      // PDF + MinerU：整个文件交给 MinerU 识别（可识别扫描版），识别完自动翻译
+      const pages = await countPages(f);
+      const up = await uploadPdfChunks(f);
+      const m = await api('ocr/start', { method: 'POST', body: JSON.stringify({
+        uploadId: up.id, chunks: up.chunks, filename: f.name, title: $('title').value, pages, translate: $('autoTr').checked,
+      }) });
+      resultMsg('uploadMsg', m, $('autoTr').checked);
+      $('file').value = ''; $('title').value = '';
+      $('uploadBtn').disabled = false;
+      refresh();
+      return;
+    }
+    if (f && /\.pdf$/i.test(f.name)) {
+      // PDF（不用 MinerU）：在浏览器里提取段落，只上传文字
+      const pdf = await extractPdf(f);
+      payload.blocks = pdf.blocks;
+      if (!payload.title && pdf.title) payload.title = pdf.title;
+    } else {
+      payload.content = f ? await f.text() : pasted;
+    }
+    const m = await api('upload', { method: 'POST', body: JSON.stringify(payload) });
+    resultMsg('uploadMsg', m, $('autoTr').checked);
+    $('file').value = ''; $('text').value = ''; $('title').value = '';
+  } catch (e) {
+    say('uploadMsg', e.message, 'err');
+  }
+  $('uploadBtn').disabled = false;
+  refresh();
+};
+
+if (getPwd()) login();
+</script>
+</body>
+</html>
