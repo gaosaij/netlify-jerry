@@ -3,7 +3,7 @@
 import { getJSON, setJSON } from './lib/store.mjs';
 import { requireAdmin } from './lib/auth.mjs';
 import { validSlug } from './lib/parse.mjs';
-import { fetchPage, ingestHtml } from './lib/ingest.mjs';
+import { fetchPage, ingestHtml, saveRaw } from './lib/ingest.mjs';
 
 const LOCK_MS = 10 * 60 * 1000;
 
@@ -30,7 +30,12 @@ export default async (req) => {
     const { url, translate, title } = meta.ingest;
     const page = await fetchPage(url, { timeoutMs: 5 * 60 * 1000 });
     if (!page.html) throw new Error('这个网址不是网页');
-    await ingestHtml({ origin, html: page.html, finalUrl: page.finalUrl, title, translate, slug });
+    if (translate === false) {
+      // 选的是“仅搬运”：只保存网页，不解析、不 OCR、不翻译
+      await saveRaw({ slug, html: page.html, finalUrl: page.finalUrl, title });
+    } else {
+      await ingestHtml({ origin, html: page.html, finalUrl: page.finalUrl, title, translate, slug });
+    }
   } catch (e) {
     await fail(e.message || String(e));
   }

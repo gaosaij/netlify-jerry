@@ -9,10 +9,10 @@ import { kick } from './lib/kick.mjs';
 import { mineruConfig, splitRanges } from './lib/mineru.mjs';
 import { json, requireAdmin } from './lib/auth.mjs';
 import {
-  parseByFormat, parseHtml, blocksFromClient, makeSlug, validSlug, sanitizeRawHtml,
+  parseByFormat, blocksFromClient, makeSlug, validSlug,
 } from './lib/parse.mjs';
 import { config as translateConfig } from './lib/translate.mjs';
-import { fetchPage, ingestHtml, saveBilingual, syncLimit } from './lib/ingest.mjs';
+import { fetchPage, ingestHtml, saveBilingual, saveRaw, syncLimit } from './lib/ingest.mjs';
 
 // 公开列表里只给必要字段
 const publicMeta = (m) => ({
@@ -144,15 +144,7 @@ async function route(req, path) {
       return json(publicMeta(meta), 201);
     }
     if (!translate) {
-      // 仅搬运：原样保存网页（去掉脚本）
-      const title = givenTitle.trim() || parseHtml(page.html).title || new URL(page.finalUrl).hostname;
-      const now = Date.now();
-      const meta = {
-        slug: makeSlug(title), title, kind: 'raw', source: 'import', sourceUrl: page.finalUrl,
-        status: 'done', total: 0, done: 0, createdAt: now, updatedAt: now, note: '仅搬运，未翻译',
-      };
-      await setText(`html/${meta.slug}`, sanitizeRawHtml(page.html, page.finalUrl));
-      await setJSON(`meta/${meta.slug}`, meta);
+      const meta = await saveRaw({ html: page.html, finalUrl: page.finalUrl, title: givenTitle });
       return json(publicMeta(meta), 201);
     }
     const meta = await ingestHtml({ origin, html: page.html, finalUrl: page.finalUrl, title: givenTitle, translate: true });

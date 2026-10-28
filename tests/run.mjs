@@ -266,6 +266,33 @@ assert.ok(pageHtml.includes('Variant paragraph'));
 process.env.SYNC_LIMIT_BYTES = '';
 ok('大网页：先建占位，后台抓取解析，再 OCR 和翻译');
 
+// “仅搬运”：大网页也只保存，不 OCR、不翻译（之前的 bug：大网页的后台导入忽略了这个选项）
+{
+  const batchesBefore = mineru.batches.size, llmBefore = stats.llmCalls;
+  process.env.SYNC_LIMIT_BYTES = '20000';
+  res = await post('/api/import', { url: origin + '/sample/s1.htm?raw', translate: false });
+  assert.equal(res.status, 201, await res.clone().text());
+  meta = await res.json();
+  assert.equal(meta.status, 'importing');
+  meta = await waitDone(meta.slug);
+  process.env.SYNC_LIMIT_BYTES = '';
+  assert.equal(meta.status, 'done', JSON.stringify(meta));
+  assert.equal(meta.kind, 'raw');
+  assert.equal(mineru.batches.size, batchesBefore, '仅搬运不能触发 OCR');
+  assert.equal(stats.llmCalls, llmBefore, '仅搬运不能触发翻译');
+  const raw = await fetch(`${origin}/t/${meta.slug}`);
+  const rawText = await raw.text();
+  assert.equal(raw.status, 200);
+  assert.ok(rawText.includes('Filler paragraph 1') && rawText.includes('<base href="'));
+  assert.ok(raw.headers.get('content-security-policy').includes("script-src 'none'"));
+  // 不勾“自动翻译”的上传：有整页图片也不 OCR
+  meta = await (await post('/api/upload', { filename: 'img-doc.html', translate: false, content: '<html><head><title>Img Doc</title></head><body><p>A normal English paragraph is here to translate later.</p><img src="https://example.com/p.jpg" style="width:612pt;height:792pt"></body></html>' })).json();
+  assert.equal(meta.status, 'idle');
+  assert.ok(meta.note.includes('没有识别'), meta.note);
+  assert.equal(mineru.batches.size, batchesBefore, '没选翻译就不 OCR');
+  ok('仅搬运（含大网页）不 OCR、不翻译；不自动翻译的上传也不 OCR');
+}
+
 // SEC 式限制：没有联系方式的 User-Agent 被拒；设置 FETCH_USER_AGENT 后可以
 process.env.FETCH_USER_AGENT = '';
 res = await post('/api/import', { url: origin + '/sample/sec-blocked.htm', translate: false });

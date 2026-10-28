@@ -1,7 +1,8 @@
 // 版面文字 → 段落：把“一行一行带坐标的文字”还原成标题和段落。
 // 浏览器（pdf.js 提取的 PDF）和服务器（PDF 转出来的 HTML，每行一个绝对定位元素）共用这一份。
-//   pages = [{ height, items: [{ str, x, y, w, h }] }]，y 向上增长（离页面底部的距离），h 为字号
-//   返回 [{ k: 'p'|'h1'|'h2'|'h3', en, page }]，page 是段落开始的页码（0 起）
+//   pages = [{ height, items: [{ str, x, y, w, h, st? }] }]，y 向上增长（离页面底部的距离），h 为字号
+//   st（可选）= { f: 字体, sz: 字号, b: 加粗, i: 斜体, c: 颜色 }，会按段落汇总后带回去，用于还原原来的样式
+//   返回 [{ k: 'p'|'h1'|'h2'|'h3', en, page, y, st? }]，page 是段落开始的页码（0 起），y 是段落第一行的纵坐标
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory();
   else root.PdfLayout = factory();
@@ -39,7 +40,14 @@
       }
       const first = ln.items[0];
       const lastIt = ln.items[ln.items.length - 1];
-      return { text: text.replace(/\s+/g, ' ').trim(), x: first.x, xEnd: lastIt.x + lastIt.w, y: ln.y, h: ln.h, pageH: page.height };
+      // 样式：取字符最多的片段；同时统计加粗/斜体的字符数，段落里再按多数决定
+      let dom = null, bold = 0, ital = 0, chars = 0;
+      for (const it of ln.items) {
+        const n = it.str.trim().length;
+        chars += n;
+        if (it.st) { if (it.st.b) bold += n; if (it.st.i) ital += n; if (!dom || n > dom.n) dom = { n, st: it.st }; }
+      }
+      return { text: text.replace(/\s+/g, ' ').trim(), x: first.x, xEnd: lastIt.x + lastIt.w, y: ln.y, h: ln.h, pageH: page.height, st: dom && dom.st, bold, ital, chars };
     }).filter((l) => l.text);
   }
 
@@ -85,7 +93,15 @@
       const right = rights[Math.floor(rights.length * 0.9)];
 
       let cur = null;
-      const flush = () => { if (cur) out.push({ ...cur, page: pageNo }); cur = null; };
+      const flush = () => {
+        if (cur) {
+          const { n, bold, ital, st, ...rest } = cur;
+          const o = { ...rest, page: pageNo };
+          if (st) o.st = { ...st, b: n && bold / n > 0.6 ? 1 : 0, i: n && ital / n > 0.6 ? 1 : 0 };
+          out.push(o);
+        }
+        cur = null;
+      };
       let prev = null;
       for (const l of lines) {
         const ratio = l.h / bodyH;
@@ -103,9 +119,10 @@
             else if (END_PUNCT.test(prev.text) && (indented || prevShort)) startNew = true;
           }
         }
-        if (startNew) { flush(); cur = { k: heading ? level : 'p', en: l.text }; }
+        if (startNew) { flush(); cur = { k: heading ? level : 'p', en: l.text, y: l.y, st: l.st, n: l.chars, bold: l.bold, ital: l.ital }; }
         else if (/[A-Za-z]-$/.test(cur.en) && /^[a-z]/.test(l.text)) cur.en = cur.en.slice(0, -1) + l.text; // 行尾连字符
         else cur.en += ' ' + l.text;
+        if (!startNew) { cur.n += l.chars; cur.bold += l.bold; cur.ital += l.ital; }
         prev = l;
       }
       flush();
@@ -122,7 +139,7 @@
         last.end = b.page;
       } else merged.push({ ...b, end: b.page });
     }
-    return merged.map(({ k, en, page }) => ({ k, en, page }));
+    return merged.map(({ end, ...b }) => b);
   }
 
 

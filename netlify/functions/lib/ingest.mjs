@@ -2,7 +2,7 @@
 import { getJSON, setJSON, setText, listMeta } from './store.mjs';
 import { kick } from './kick.mjs';
 import {
-  parseHtml, analyze, contentHash, makeSlug, decodeBody, sanitizeRawHtml,
+  parseHtml, analyze, contentHash, makeSlug, decodeBody, sanitizeRawHtml, BACK_LINK,
 } from './parse.mjs';
 import { looksPositioned, parsePositioned } from './positioned.mjs';
 import { config as translateConfig, autoTranslateMaxChars, pendingChars } from './translate.mjs';
@@ -12,6 +12,7 @@ export const syncLimit = () => Number(process.env.SYNC_LIMIT_BYTES) || 3 * 1024 
 export const MAX_IMPORT_BYTES = 40 * 1024 * 1024;
 const PAGE_LAYOUT_MAX = 3 * 1024 * 1024;           // 太大的网页不保留原样式（响应体有 6MB 上限），改用通用对照排版
 const MAX_OCR_IMAGES = 80;
+export const MAX_RAW_BYTES = 18 * 1024 * 1024; // “仅搬运”的网页上限：输出时走流式响应，最大 20MB
 
 const BROWSER_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
 
@@ -88,7 +89,7 @@ export async function saveBilingual({ origin, slug, title, blocks, html, source,
     meta.status = 'skip';
     meta.note = '检测到文章已经包含中文，无需重复翻译，已按原文保存';
     meta.done = meta.total;
-  } else if (candidates.length && ocrImages && mineruConfig().token) {
+  } else if (translate && candidates.length && ocrImages && mineruConfig().token) {
     // 里面有整页图片（PDF 页面截图）：文字在图里，先 OCR 再翻译
     meta.status = 'ocr';
     meta.ocrDone = 0; meta.ocrTotal = candidates.length;
@@ -105,7 +106,8 @@ export async function saveBilingual({ origin, slug, title, blocks, html, source,
     }
   }
   if (candidates.length && !meta.ocr && !info.alreadyChinese) {
-    meta.note = (meta.note ? meta.note + '；' : '') + `里面有 ${candidates.length} 张整页图片（可能是 PDF 页面），文字在图里没有被翻译；配置 MINERU_API_TOKEN 后可自动识别`;
+    const why = !translate ? '因为没有选择翻译，没有识别' : '配置 MINERU_API_TOKEN 后可自动识别';
+    meta.note = (meta.note ? meta.note + '；' : '') + `里面有 ${candidates.length} 张整页图片（可能是 PDF 页面），文字在图里没有被翻译（${why}）`;
   }
 
   if (html) await setText(`html/${meta.slug}`, html);
@@ -137,4 +139,34 @@ export async function ingestHtml({ origin, html, finalUrl, title, translate, slu
     origin, slug, title: (title || '').trim() || parsed.title || (finalUrl ? new URL(finalUrl).hostname : ''),
     blocks: parsed.blocks, html: page, source, sourceUrl: finalUrl, translate,
   });
+}
+
+// 大网页的轻量清理：不用 DOM 解析（十几 MB 的网页会占用太多内存），只去掉脚本、加 <base> 和返回链接。
+// 页面输出时还带 CSP: script-src 'none'，脚本本来也执行不了。
+export function lightSanitize(html, sourceUrl) {
+  let out = html.replace(/<script\b[\s\S]*?<\/script\s*>/gi, '');
+  const base = `<base href="${String(sourceUrl).replace(/"/g, '&quot;')}">`;
+  out = /<head[^>]*>/i.test(out) ? out.replace(/<head[^>]*>/i, (m) => m + base) : base + out;
+  return /<body[^>]*>/i.test(out) ? out.replace(/<body[^>]*>/i, (m) => m + BACK_LINK) : BACK_LINK + out;
+}
+
+const decodeEntities = (t) => t.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+
+// “仅搬运”：原样保存网页（去掉脚本），不翻译、不 OCR。slug 已存在（后台导入先建了占位）时更新它
+export async function saveRaw({ slug, html, finalUrl, title }) {
+  if (html.length > MAX_RAW_BYTES) {
+    throw httpError(`网页太大（${Math.round(html.length / 1048576)}MB），“仅搬运”最大支持 18MB；可以选“搬运并翻译”`, 413);
+  }
+  const m = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  const name = (title || '').trim() || (m && decodeEntities(m[1]).replace(/\s+/g, ' ').trim()) || new URL(finalUrl).hostname;
+  const old = slug ? await getJSON(`meta/${slug}`) : null;
+  const now = Date.now();
+  const meta = {
+    slug: slug || makeSlug(name), title: name, kind: 'raw', source: 'import', sourceUrl: finalUrl,
+    status: 'done', total: 0, done: 0, createdAt: (old && old.createdAt) || now, updatedAt: now, note: '仅搬运，未翻译',
+  };
+  const clean = html.length > 3 * 1024 * 1024 ? lightSanitize(html, finalUrl) : sanitizeRawHtml(html, finalUrl);
+  await setText(`html/${meta.slug}`, clean);
+  await setJSON(`meta/${meta.slug}`, meta);
+  return meta;
 }

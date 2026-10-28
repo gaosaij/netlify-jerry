@@ -7,8 +7,18 @@ import { getJSON, getText } from './lib/store.mjs';
 import { renderPage, renderStyledPage, esc } from './lib/render.mjs';
 import { validSlug } from './lib/parse.mjs';
 
+// 超过 4MB 的页面用流式响应输出（Netlify 普通响应上限 6MB，流式可到 20MB）
+const streamed = (text) => {
+  const bytes = Buffer.from(text);
+  return new ReadableStream({
+    start(ctrl) {
+      for (let i = 0; i < bytes.length; i += 262144) ctrl.enqueue(bytes.subarray(i, i + 262144));
+      ctrl.close();
+    },
+  });
+};
 const html = (body, status, headers = {}) =>
-  new Response(body, {
+  new Response(typeof body === 'string' && body.length > 4 * 1024 * 1024 ? streamed(body) : body, {
     status,
     headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', ...headers },
   });
